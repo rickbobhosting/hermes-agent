@@ -117,6 +117,27 @@ def test_gated_html_redirects_to_login(gated_app):
     assert r.headers["location"].startswith("/auth/login?provider=stub")
 
 
+def test_single_password_provider_redirects_to_login_form_not_oauth(gated_app):
+    """A password-only provider cannot participate in the OAuth auto-SSO flow."""
+    import secrets
+
+    from plugins.dashboard_auth.basic import BasicAuthProvider, hash_password
+
+    clear_providers()
+    register_provider(
+        BasicAuthProvider(
+            username="ricky",
+            password_hash=hash_password("correct horse battery staple"),
+            secret=secrets.token_bytes(32),
+        )
+    )
+
+    r = gated_app.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/login")
+    assert "/auth/login" not in r.headers["location"]
+
+
 def test_gated_auth_providers_is_public(gated_app):
     r = gated_app.get("/api/auth/providers")
     assert r.status_code == 200
