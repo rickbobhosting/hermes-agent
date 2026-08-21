@@ -204,11 +204,21 @@ async def _lifespan(app: "FastAPI"):
         )
         cron_thread.start()
 
+    # Detached dashboard chat processes remain live and reattachable for a
+    # bounded window. The reaper closes dead or expired sessions.
+    pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
+
     try:
         yield
     finally:
         if cron_stop is not None:
             cron_stop.set()
+        pty_reaper_task.cancel()
+        try:
+            await pty_reaper_task
+        except asyncio.CancelledError:
+            pass
+        await PTY_REGISTRY.close_all()
 
 
 def _get_event_state(app: "FastAPI"):
@@ -12399,6 +12409,83 @@ else:
 
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
+
+from hermes_cli.pty_session import (  # noqa: E402
+    PtySessionRegistry,
+    RegistryFull,
+    run_reaper,
+)
+
+PTY_REGISTRY = PtySessionRegistry(
+    ttl=30 * 60,
+    max_sessions=16,
+    buffer_cap=1 * 1024 * 1024,
+    read_timeout=_PTY_READ_CHUNK_TIMEOUT,
+)
+
+
+async def _legacy_pty_pump(ws: "WebSocket", bridge) -> None:
+    """Run the original one-socket/one-PTY lifecycle for clients without attach."""
+    loop = asyncio.get_running_loop()
+
+    async def pump_pty_to_ws() -> None:
+        try:
+            while True:
+                chunk = await loop.run_in_executor(
+                    None, bridge.read, _PTY_READ_CHUNK_TIMEOUT
+                )
+                if chunk is None:
+                    return
+                if not chunk:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await ws.send_bytes(chunk)
+                except Exception:
+                    return
+        finally:
+            # Child EOF must unpark the receive loop even if the browser never
+            # delivered a FIN. close() is idempotent and blocking.
+            try:
+                await asyncio.to_thread(bridge.close)
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    reader_task = asyncio.create_task(pump_pty_to_ws())
+    try:
+        while True:
+            try:
+                message = await ws.receive()
+            except RuntimeError:
+                break
+            if message.get("type") == "websocket.disconnect":
+                break
+            raw = message.get("bytes")
+            if raw is None:
+                text = message.get("text")
+                raw = text.encode("utf-8") if isinstance(text, str) else b""
+            if not raw:
+                continue
+            match = _RESIZE_RE.match(raw)
+            if match and match.end() == len(raw):
+                bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
+                continue
+            bridge.write(raw)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await asyncio.to_thread(bridge.close)
+
+
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # Starlette's TestClient reports the peer as "testclient"; treat it as
 # loopback so tests don't need to rewrite request scope.
@@ -13524,7 +13611,8 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     # --- spawn PTY ------------------------------------------------------
-    resume = ws.query_params.get("resume") or None
+    raw_resume = ws.query_params.get("resume") or None
+    resume = raw_resume
     profile = ws.query_params.get("profile") or None
     channel = _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
@@ -13566,97 +13654,81 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
 
+    attach_token = ws.query_params.get("attach") or None
+    registry_resume = raw_resume
+    if raw_resume and env:
+        registry_resume = env.get("HERMES_TUI_RESUME") or raw_resume
+    if attach_token is not None and (registry_resume or profile):
+        # Explicit resumes are keyed by their canonical target. The implicit
+        # active-session-file fallback must not change a living chat's key.
+        attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
+
+    def _spawn():
+        return PtyBridge.spawn(argv, cwd=cwd, env=env)
+
+    if attach_token is None:
+        try:
+            bridge = await asyncio.to_thread(_spawn)
+        except PtyUnavailableError as exc:
+            await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+            await ws.close(code=1011)
+            return
+        except (FileNotFoundError, OSError) as exc:
+            await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
+            await ws.close(code=1011)
+            return
+        await _legacy_pty_pump(ws, bridge)
+        return
+
     try:
-        bridge = await asyncio.to_thread(PtyBridge.spawn, argv, cwd=cwd, env=env)
+        session, created = await PTY_REGISTRY.attach_or_spawn(
+            attach_token,
+            spawn=_spawn,
+        )
     except PtyUnavailableError as exc:
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
-    except (FileNotFoundError, OSError) as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
+    except (FileNotFoundError, OSError, RegistryFull) as exc:
+        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
 
-    loop = asyncio.get_running_loop()
+    # A reattached xterm receives the bounded output tail, then asks the TUI
+    # for one full redraw so alternate-screen differential output is complete.
+    await session.attach(ws, force_redraw=not created)
 
-    # --- reader task: PTY master → WebSocket ----------------------------
-    async def pump_pty_to_ws() -> None:
-        try:
-            while True:
-                chunk = await loop.run_in_executor(
-                    None, bridge.read, _PTY_READ_CHUNK_TIMEOUT
-                )
-                if chunk is None:  # EOF
-                    return
-                if not chunk:  # no data this tick; yield control and retry
-                    await asyncio.sleep(0)
-                    continue
-                try:
-                    await ws.send_bytes(chunk)
-                except Exception:
-                    return
-        finally:
-            # The child has exited (EOF) or the send side broke.  Close the
-            # WebSocket so the writer loop's ``ws.receive()`` returns instead
-            # of blocking forever — otherwise, when the browser's socket is
-            # half-open (no FIN delivered, common on macOS/launchd) the
-            # handler never reaches its ``finally`` and the PTY's fds leak.
-            # With dashboard auto-reconnect (#52962) every dropped socket then
-            # stacks a fresh PTY on top of the orphaned one, exhausting fds.
-            #
-            # Reap the bridge here too (close() is idempotent): on child EOF the
-            # writer loop's ``finally`` is the usual closer, but if the handler
-            # task is cancelled the instant we close the WS, that ``finally``
-            # can be skipped, leaking the PTY. Closing from the EOF path makes
-            # the reap independent of that cancellation race (#54028).
-            try:
-                await asyncio.to_thread(bridge.close)
-            except Exception:
-                pass
-            try:
-                await ws.close()
-            except Exception:
-                pass
-
-    reader_task = asyncio.create_task(pump_pty_to_ws())
-
-    # --- writer loop: WebSocket → PTY master ----------------------------
+    # The session's drain task owns PTY reads while the socket is attached or
+    # absent. This loop only forwards browser input to the living PTY.
     try:
         while True:
             try:
-                msg = await ws.receive()
+                message = await ws.receive()
             except RuntimeError:
-                # Raised when ws.receive() is called after the socket is
-                # already disconnected (e.g. closed by the reader task above).
                 break
-            msg_type = msg.get("type")
-            if msg_type == "websocket.disconnect":
+            if message.get("type") == "websocket.disconnect":
                 break
-            raw = msg.get("bytes")
+            raw = message.get("bytes")
             if raw is None:
-                text = msg.get("text")
+                text = message.get("text")
                 raw = text.encode("utf-8") if isinstance(text, str) else b""
             if not raw:
                 continue
 
-            # Resize escape is consumed locally, never written to the PTY.
             match = _RESIZE_RE.match(raw)
             if match and match.end() == len(raw):
-                cols = int(match.group(1))
-                rows = int(match.group(2))
-                bridge.resize(cols=cols, rows=rows)
+                session.bridge.resize(
+                    cols=int(match.group(1)),
+                    rows=int(match.group(2)),
+                )
                 continue
-
-            bridge.write(raw)
+            session.bridge.write(raw)
     except WebSocketDisconnect:
         pass
     finally:
-        reader_task.cancel()
-        try:
-            await reader_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        await asyncio.to_thread(bridge.close)
+        # Detach only. The agent keeps working, output remains buffered, and a
+        # later browser connection with the same token reattaches.
+        PTY_REGISTRY.detach(attach_token, ws)
 
 
 # ---------------------------------------------------------------------------

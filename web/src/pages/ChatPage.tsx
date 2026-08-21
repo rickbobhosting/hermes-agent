@@ -36,6 +36,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 import { normalizeSessionTitle } from "@/lib/chat-title";
+import { ptyAttachToken } from "@/lib/pty-attach";
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -679,6 +680,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       const params: Record<string, string> = { channel };
       if (resumeParam) params.resume = resumeParam;
       if (forceFresh) params.fresh = "1";
+      // The server owns the PTY lifecycle. Reusing this opaque browser token
+      // reattaches after refresh/close; an explicit fresh chat rotates it.
+      params.attach = ptyAttachToken(forceFresh);
       // Profile-scoped chat: the PTY child gets HERMES_HOME pointed at the
       // selected profile, so the conversation runs with that profile's model,
       // skills, memory, and sessions (see web_server._resolve_chat_argv).
@@ -728,7 +732,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
 
     ws.onclose = (ev) => {
-      wsRef.current = null;
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       if (unmounting) {
         return;
       }
@@ -773,6 +779,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       }
       if (ev.code === 1011) {
         // Server already wrote an ANSI error frame.
+        return;
+      }
+      if (ev.code === 4410) {
+        term.write(`\r\n\x1b[90m[session ended]\x1b[0m\r\n`);
+        setSessionEnded(true);
+        return;
+      }
+      if (ev.code === 4409) {
+        // A newer tab reattached this browser's live PTY.
         return;
       }
       if (!ev.wasClean || ev.code === 1001 || ev.code === 1006) {
