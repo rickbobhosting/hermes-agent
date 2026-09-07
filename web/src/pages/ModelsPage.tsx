@@ -987,7 +987,7 @@ function ModelSettingsPanel({
           <Settings2 className="h-4 w-4 shrink-0 text-muted-foreground" />
           <CardTitle className="text-sm">Model Settings</CardTitle>
           <span className="max-w-full min-w-0 text-xs text-text-secondary [overflow-wrap:anywhere]">
-            applies to new sessions
+            applies to eligible future turns and sessions
           </span>
         </div>
       </CardHeader>

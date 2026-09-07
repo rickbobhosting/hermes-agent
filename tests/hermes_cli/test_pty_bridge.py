@@ -278,6 +278,10 @@ class TestPtyBridgeClose:
         fake = _FakeProc()
 
         def fake_killpg(pgid, sig):
+            if sig == 0:
+                if fake.alive:
+                    return
+                raise ProcessLookupError
             sent.append((pgid, sig))
             fake.alive = False
 

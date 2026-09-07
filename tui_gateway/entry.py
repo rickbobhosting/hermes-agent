@@ -34,8 +34,15 @@ _mcp_discovery_enabled = False
 
 
 def _install_sidecar_publisher() -> None:
-    """Mirror every dispatcher emit to the dashboard sidebar via WS when set (best-effort)."""
-    url = os.environ.get("HERMES_TUI_SIDECAR_URL")
+    """Consume private dashboard capabilities before any agent can inherit them.
+
+    The sidecar URL is retained only by the publisher transport.  The gateway
+    and active-session values are launcher-to-gateway coordination data and are
+    removed from the process environment at the same trust boundary.
+    """
+    url = os.environ.pop("HERMES_TUI_SIDECAR_URL", None)
+    os.environ.pop("HERMES_TUI_GATEWAY_URL", None)
+    os.environ.pop("HERMES_TUI_ACTIVE_SESSION_FILE", None)
     if not url:
         return
     from tui_gateway.event_publisher import WsPublisherTransport

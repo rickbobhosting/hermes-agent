@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 import time
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 try:
     from winpty import PtyProcess  # type: ignore
@@ -109,7 +109,13 @@ class WinPtyBridge:
             return False
         return True
 
-    async def write(self, data: bytes, *, timeout: float = 10.0) -> bool:
+    async def write(
+        self,
+        data: bytes,
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+        timeout: float = 1.0,
+    ) -> bool:
         """Write off-loop and tear down ConPTY when its input pipe wedges.
 
         ``wait_for(to_thread(...))`` alone only cancels the asyncio wrapper;
@@ -121,17 +127,18 @@ class WinPtyBridge:
         of a wedged child: the PTY outlives its socket by design, so give the
         in-flight write the grace window and only terminate if it never lands.
         """
-        if self._closed:
+        if self._closed or not data:
+            return not data
+        if timeout <= 0 or (cancelled is not None and cancelled()):
             return False
-        if not data:
-            return True
         loop = asyncio.get_running_loop()
         write_future = loop.run_in_executor(None, self._write_blocking, data)
         try:
-            return await asyncio.wait_for(
+            delivered = await asyncio.wait_for(
                 asyncio.shield(write_future),
                 timeout=max(0.0, timeout),
             )
+            return delivered and not (cancelled is not None and cancelled())
         except asyncio.TimeoutError:
             await self._stop_stalled_write(write_future)
             return False

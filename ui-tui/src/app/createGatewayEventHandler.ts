@@ -13,6 +13,7 @@ import type {
   GatewaySkin,
   SessionMostRecentResponse
 } from '../gatewayTypes.js'
+import { publishDashboardActiveSession } from '../lib/activeSessionFile.js'
 import { billingDialogCopy } from '../lib/billingDialog.js'
 import { relativeLuminance } from '../lib/color.js'
 import { isTodoDone } from '../lib/liveProgress.js'
@@ -418,7 +419,7 @@ const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): Sub
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: GatewayEvent) => void {
   syncThemeToTerminalBackground()
 
-  const { rpc } = ctx.gateway
+  const { gw, rpc } = ctx.gateway
   const { STARTUP_RESUME_ID, newSession, recoverSidRef, resumeById, setCatalog } = ctx.session
   const { bellOnComplete, bellOnPrompt, stdout, sys } = ctx.system
 
@@ -783,6 +784,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'session.info': {
         const info = ev.payload
+
+        // Compression/model transitions can rotate the persistent session key
+        // without changing the gateway's runtime sid. Only the focused sid may
+        // update the dashboard breadcrumb; background live sessions also emit
+        // session.info and are deliberately ignored by the guard above.
+        const persistentSessionKey = info.session_key ?? info.stored_session_id
+
+        if (sid && persistentSessionKey) {
+          publishDashboardActiveSession(gw, persistentSessionKey, sid)
+        }
 
         patchUiState(state => ({
           ...state,

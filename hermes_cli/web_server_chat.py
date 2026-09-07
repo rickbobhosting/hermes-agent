@@ -8,6 +8,7 @@ import atexit
 import concurrent.futures
 import contextlib
 import hmac
+import json
 import os
 import re
 import sys
@@ -16,8 +17,13 @@ import threading
 import urllib.request
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pathlib import Path
-from typing import Optional
-from hermes_cli.pty_session import PtySessionRegistry
+from typing import Any, Optional
+from hermes_cli.pty_session import (
+    DEFAULT_INPUT_CHUNK_CAP,
+    DEFAULT_INPUT_WRITE_TIMEOUT,
+    PtySessionRegistry,
+    WS_CLOSE_SLOW_CLIENT,
+)
 
 # Same logger the code used before extraction (record parity).
 _log = logging.getLogger("hermes_cli.web_server")
@@ -46,7 +52,10 @@ _PTY_READ_CHUNK_TIMEOUT = 0.2
 # A positive sleep lets other coroutines run and keeps dashboard idle CPU low (#42627).
 _PTY_IDLE_BACKOFF = 0.05
 PTY_REGISTRY = PtySessionRegistry(
-    ttl=30 * 60, max_sessions=16, buffer_cap=1 * 1024 * 1024, read_timeout=_PTY_READ_CHUNK_TIMEOUT)
+    max_sessions=16,
+    buffer_cap=1 * 1024 * 1024,
+    read_timeout=_PTY_READ_CHUNK_TIMEOUT,
+)
 
 
 async def _close_stalled_pty_input(ws: "WebSocket", *, path: str) -> None:
@@ -117,8 +126,16 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
             if match and match.end() == len(raw):
                 bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
                 continue
-            if not await bridge.write(raw):
-                await _close_stalled_pty_input(ws, path="legacy")
+            if len(raw) > DEFAULT_INPUT_CHUNK_CAP or not await bridge.write(
+                raw, timeout=DEFAULT_INPUT_WRITE_TIMEOUT
+            ):
+                try:
+                    await ws.close(
+                        code=WS_CLOSE_SLOW_CLIENT,
+                        reason="pty_attachment_interrupted",
+                    )
+                except Exception:
+                    pass
                 break
     except WebSocketDisconnect:
         pass
@@ -446,11 +463,193 @@ def _active_session_file_for_channel(app: "FastAPI", channel: str) -> Path:
     """Return the per-channel file where a dashboard TUI writes its active sid."""
     from hermes_cli.web_server import _get_pty_active_session_files
     files = _get_pty_active_session_files(app)
-    if files.get(channel) is None:
-        fd, raw_path = tempfile.mkstemp(prefix="hermes-pty-active-", suffix=".json")
-        os.close(fd)
-        files[channel] = Path(raw_path)
-    return files[channel]
+    existing = files.get(channel)
+    if existing is not None:
+        return existing
+    fd, raw_path = tempfile.mkstemp(prefix="hermes-pty-active-", suffix=".json")
+    os.close(fd)
+    path = Path(raw_path)
+    files[channel] = path
+    return path
+
+
+_PTY_ACTIVE_SESSION_FRAME_MAX_CHARS = 16 * 1024
+_PTY_REAPER_INTERVAL_SECONDS = 60.0
+
+
+def _state_dict(app: "FastAPI", name: str) -> dict:
+    try:
+        return getattr(app.state, name)
+    except AttributeError:
+        value: dict = {}
+        setattr(app.state, name, value)
+        return value
+
+
+def _claim_active_session_file_for_channel(app: "FastAPI", channel: str) -> Path:
+    """Reserve a breadcrumb while one retained PTY admission is in flight."""
+    path = _active_session_file_for_channel(app, channel)
+    claims = _state_dict(app, "pty_active_session_file_claims")
+    claims[channel] = claims.get(channel, 0) + 1
+    return path
+
+
+def _read_active_session_file(path: Path) -> Optional[str]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if len(raw) > _PTY_ACTIVE_SESSION_FRAME_MAX_CHARS:
+            return None
+        data = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    session_id = str(data.get("session_id") or "").strip()
+    if (
+        not session_id
+        or len(session_id) > 512
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in session_id)
+    ):
+        return None
+    return session_id
+
+
+def _forget_active_session_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _forget_active_session_channel(app: "FastAPI", channel: str) -> None:
+    from hermes_cli.web_server import _get_pty_active_session_files
+    path = _get_pty_active_session_files(app).pop(channel, None)
+    if path is not None:
+        _forget_active_session_file(path)
+
+
+def _snapshot_value(snapshot: Any, field: str, default: Any = None) -> Any:
+    return snapshot.get(field, default) if isinstance(snapshot, dict) else getattr(snapshot, field, default)
+
+
+def _snapshot_channel(snapshot: Any) -> Optional[str]:
+    metadata = _snapshot_value(snapshot, "metadata", {}) or {}
+    channel = metadata.get("channel") if isinstance(metadata, dict) else None
+    return channel if isinstance(channel, str) else None
+
+
+async def _forget_event_channel_cache(app: "FastAPI", channel: str) -> None:
+    try:
+        lock = app.state.event_lock
+    except AttributeError:
+        _state_dict(app, "event_active_sessions").pop(channel, None)
+        return
+    async with lock:
+        _state_dict(app, "event_active_sessions").pop(channel, None)
+
+
+async def _forget_active_session_channel_if_unowned(
+    app: "FastAPI",
+    registry: PtySessionRegistry,
+    channel: str,
+    *,
+    expected_path: Optional[Path] = None,
+) -> bool:
+    """Remove a breadcrumb only after all admissions and owners are gone."""
+    if _state_dict(app, "pty_active_session_file_claims").get(channel, 0):
+        return False
+    if any(_snapshot_channel(item) == channel for item in await registry.snapshots()):
+        return False
+    from hermes_cli.web_server import _get_pty_active_session_files
+    files = _get_pty_active_session_files(app)
+    path = files.get(channel)
+    if path is None or (expected_path is not None and path != expected_path):
+        return False
+    files.pop(channel, None)
+    _forget_active_session_file(path)
+    await _forget_event_channel_cache(app, channel)
+    return True
+
+
+async def _release_active_session_file_claim(
+    app: "FastAPI",
+    registry: PtySessionRegistry,
+    channel: str,
+    path: Path,
+) -> None:
+    claims = _state_dict(app, "pty_active_session_file_claims")
+    remaining = claims.get(channel, 0) - 1
+    if remaining > 0:
+        claims[channel] = remaining
+        return
+    claims.pop(channel, None)
+    # A session may exit and be reaped before admission releases its final
+    # claim. Reconcile every final release; a living snapshot preserves it.
+    await _forget_active_session_channel_if_unowned(
+        app, registry, channel, expected_path=path
+    )
+
+
+async def _reap_pty_sessions_and_artifacts(
+    app: "FastAPI", registry: PtySessionRegistry
+) -> None:
+    before = await registry.snapshots()
+    dead_channels = {
+        channel
+        for snapshot in before
+        if not bool(_snapshot_value(snapshot, "alive", False))
+        if (channel := _snapshot_channel(snapshot)) is not None
+    }
+    await registry.reap_idle()
+    for channel in dead_channels:
+        await _forget_active_session_channel_if_unowned(app, registry, channel)
+
+
+async def _run_pty_reaper_with_artifact_cleanup(
+    app: "FastAPI",
+    registry: PtySessionRegistry,
+    *,
+    interval: float = _PTY_REAPER_INTERVAL_SECONDS,
+) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _reap_pty_sessions_and_artifacts(app, registry)
+        except Exception:
+            _log.exception("PTY registry/artifact cleanup failed")
+
+
+def _watch_retained_pty_exit(
+    app: "FastAPI", registry: PtySessionRegistry, session: Any, channel: str
+) -> None:
+    drain_task = getattr(session, "_drain_task", None)
+    if not isinstance(drain_task, asyncio.Task):
+        return
+    watchers = _state_dict(app, "pty_session_watchers")
+    if session.id in watchers:
+        return
+
+    async def watch() -> None:
+        try:
+            await asyncio.shield(drain_task)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            _log.exception("dashboard PTY drain failed session=%s", session.id)
+        try:
+            await registry.reap_idle()
+            await _forget_active_session_channel_if_unowned(app, registry, channel)
+        except Exception:
+            _log.exception("dashboard PTY artifact cleanup failed session=%s", session.id)
+
+    watcher = asyncio.create_task(watch())
+    watchers[session.id] = watcher
+
+    def discard(task: asyncio.Task) -> None:
+        if watchers.get(session.id) is task:
+            watchers.pop(session.id, None)
+
+    watcher.add_done_callback(discard)
 
 
 # On timeout asyncio cancels the awaitable but the console thread keeps running;

@@ -33,6 +33,10 @@ _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "SIGNAL_HOME_CHANNEL_NAME", "SIGNAL_IGNORE_STORIES", "HASS_TOKEN", "HASS_URL",
     "EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST",
     "EMAIL_HOME_ADDRESS", "EMAIL_HOME_ADDRESS_NAME", "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Private dashboard/TUI transport capabilities and the local breadcrumb path.
+    # They belong only to the launching dashboard and gateway process and must
+    # never reach agent-spawned commands.
+    "HERMES_TUI_ACTIVE_SESSION_FILE", "HERMES_TUI_GATEWAY_URL", "HERMES_TUI_SIDECAR_URL",
     "GATEWAY_ALLOWED_USERS", "GH_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
     "GITHUB_APP_INSTALLATION_ID", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET",
     "DAYTONA_API_KEY", "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET",
@@ -119,6 +123,12 @@ _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 # cannot reply).
 _TERMINAL_FIRST_PARTY_ENV_PREFIXES = ("BUZZ_",)
 
+_HERMES_INTERNAL_TRANSPORT_VARS = frozenset({
+    "HERMES_TUI_ACTIVE_SESSION_FILE",
+    "HERMES_TUI_GATEWAY_URL",
+    "HERMES_TUI_SIDECAR_URL",
+})
+
 
 def _matches_terminal_first_party_prefix(name: str) -> bool:
     """Pure name check (``BUZZ_*``), regardless of session context — the snapshot
@@ -176,6 +186,8 @@ def _is_hermes_internal_secret(key: str) -> bool:
     auth; non-secret routing hints stay visible). Stripped on every spawn path
     regardless of env_passthrough registration or ``inherit_credentials``."""
     upper = key.upper()
+    if upper in _HERMES_INTERNAL_TRANSPORT_VARS:
+        return True
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True
     return upper.startswith("GATEWAY_RELAY_") and upper.endswith(("_SECRET", "_KEY", "_TOKEN"))
@@ -208,6 +220,9 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     # enumerated here to stay stripped on the inherit_credentials=True path.
     "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET", "GATEWAY_RELAY_DELIVERY_KEY",
     "HASS_TOKEN", "EMAIL_PASSWORD", "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Dashboard/TUI transport URLs carry bearer capabilities; the breadcrumb
+    # path is private coordination state. Neither belongs in child processes.
+    "HERMES_TUI_ACTIVE_SESSION_FILE", "HERMES_TUI_GATEWAY_URL", "HERMES_TUI_SIDECAR_URL",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
 })

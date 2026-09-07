@@ -9,15 +9,15 @@
  *      credential warnings. Independent of the PTY pane's session by
  *      design. The model badge does NOT come from here: it reads the
  *      effective config model over REST (`/api/model/info`), and the model
- *      picker writes config over REST (`/api/model/set`) then offers a
- *      dashboard reload so the running chat adopts the new model.
+ *      picker writes config over REST (`/api/model/set`) then offers an
+ *      optional dashboard reload.
  *
  *   2. **Event subscriber** (/api/events?channel=…) — passive, receives
  *      every dispatcher emit from the PTY-side `tui_gateway.entry` that
  *      the dashboard fanned out.  The sidebar uses it for `session.info`
  *      (live chat title) and `dashboard.new_session_requested`.  The
- *      `channel` id ties this listener to the same chat tab's PTY child —
- *      see `ChatPage.tsx` for where the id is generated.  Transient drops
+ *      `channel` id is derived from the same scoped attach identity as the
+ *      chat tab's PTY child. Transient drops
  *      (gateway restart, network blip) auto-reconnect with exponential
  *      backoff; auth rejections are terminal.  See `lib/events-reconnect`.
  *
@@ -48,6 +48,7 @@ import {
   shouldRetryEventsClose,
 } from "@/lib/events-reconnect";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
+import { ptyActiveSessionKeyFromEvent } from "@/lib/pty-attach";
 
 import { cn } from "@/lib/utils";
 import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
@@ -91,6 +92,7 @@ interface ChatSidebarProps {
   profile?: string;
   className?: string;
   onDashboardNewSessionRequest?: () => void;
+  onPersistentSessionChange?: (sessionKey: string) => void;
   onSessionTitleChange?: (title: string | null) => void;
 }
 
@@ -114,6 +116,7 @@ export function ChatSidebar({
   profile,
   className,
   onDashboardNewSessionRequest,
+  onPersistentSessionChange,
   onSessionTitleChange,
 }: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
@@ -145,11 +148,9 @@ export function ChatSidebar({
   // Bumped on model change/save so ReasoningPicker re-reads the saved effort
   // (config is profile-scoped the same way the model badge is).
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
-  // Set after the picker saves a model and the user declines the reload: config
-  // is updated but the running session keeps its model until rebuilt.
+  // Set after a picker save to explain the cautious future-turn semantics.
   const [modelNotice, setModelNotice] = useState<string | null>(null);
-  // Short name of a just-saved model awaiting confirm to reload (a fresh chat
-  // session is how the running chat adopts it; we confirm before discarding it).
+  // Short name of a just-saved model awaiting optional dashboard reload.
   const [pendingReloadModel, setPendingReloadModel] = useState<string | null>(
     null,
   );
@@ -282,9 +283,8 @@ export function ChatSidebar({
       !unmounting &&
       setError((current) => (isEventsFeedMessage(current) ? null : current));
 
-    // Single scheduling path. `close` always follows `error` for a failed
-    // socket, so scheduling from `error` too would queue two timers and
-    // leak the first — only the latest is tracked for cleanup.
+    // Single scheduling path shared by close, error, ticket failure, and
+    // timeout. Some browser transports emit error without a later close.
     const scheduleReconnect = () => {
       if (unmounting || reconnectTimer) {
         return;
@@ -371,6 +371,16 @@ export function ChatSidebar({
       socket.addEventListener("error", () => {
         if (isCurrent()) {
           surface(EVENTS_DISCONNECTED_MESSAGE);
+          // Retire this exact socket before closing it. If close is delivered
+          // synchronously or later, its identity guard cannot queue a second
+          // retry on top of this one.
+          ws = null;
+          try {
+            socket?.close();
+          } catch {
+            // The reconnect below remains authoritative.
+          }
+          scheduleReconnect();
         }
       });
 
@@ -406,7 +416,15 @@ export function ChatSidebar({
 
         const { type, payload } = frame.params;
 
-        if (type === "session.info") {
+        if (type === "dashboard.active_session_changed") {
+          // This dedicated local-TUI event is the ownership projection for
+          // this attach-token-derived channel. Generic session.info events can
+          // describe background sessions and must never change PTY ownership.
+          const sessionKey = ptyActiveSessionKeyFromEvent(type, payload);
+          if (sessionKey) {
+            onPersistentSessionChange?.(sessionKey);
+          }
+        } else if (type === "session.info") {
           const title = titleFromSessionInfoPayload(payload);
           if (title !== undefined) {
             onSessionTitleChange?.(title);
@@ -429,7 +447,13 @@ export function ChatSidebar({
       }
       ws?.close();
     };
-  }, [channel, onDashboardNewSessionRequest, onSessionTitleChange, version]);
+  }, [
+    channel,
+    onDashboardNewSessionRequest,
+    onPersistentSessionChange,
+    onSessionTitleChange,
+    version,
+  ]);
 
   // Seed the badge on mount and re-read it whenever the sockets are rebuilt
   // (a profile/channel switch bumps `version`).
@@ -495,7 +519,7 @@ export function ChatSidebar({
             refreshKey={modelRefreshKey}
             onChanged={(effort) =>
               setModelNotice(
-                `Reasoning effort set to ${effort}. Run /new or refresh the page to apply it to this chat.`,
+                `Reasoning effort set to ${effort}. It applies to eligible future turns or sessions; a running chat may keep its current behavior.`,
               )
             }
           />
@@ -557,7 +581,7 @@ export function ChatSidebar({
             // and calls back; don't announce until the user confirms.
             if (!result.confirm_required) {
               refreshEffectiveModel();
-              // Ask before reloading: applying the model starts a fresh chat.
+              // The reload is optional and reattaches the current dashboard PTY.
               setPendingReloadModel(model.split("/").slice(-1)[0]);
             }
             return result;
@@ -575,7 +599,7 @@ export function ChatSidebar({
           const m = pendingReloadModel;
           setPendingReloadModel(null);
           setModelNotice(
-            `Model set to ${m}. Run /new or refresh the page to apply it to this chat.`,
+            `Model set to ${m}. Eligible unpinned chats can use it on a future turn; pinned overrides may keep their assigned model.`,
           );
         }}
       />

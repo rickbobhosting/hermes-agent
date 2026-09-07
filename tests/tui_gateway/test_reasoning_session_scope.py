@@ -52,6 +52,13 @@ class TestSessionInfoReasoningEffort:
         info = _session_info(_agent(None))
         assert info["reasoning_effort"] == ""
 
+    def test_reports_persistent_session_key(self) -> None:
+        info = _session_info(
+            _agent(None),
+            {"session_key": "stored-after-compression"},
+        )
+        assert info["stored_session_id"] == "stored-after-compression"
+
 
 class TestConfigSetReasoningSessionScope:
     """Session-targeted reasoning changes must not touch global config."""
@@ -100,4 +107,3 @@ class TestLoadReasoningConfigYamlBoolean:
             server, "_load_cfg", return_value={"agent": {"reasoning_effort": "false"}}
         ):
             assert server._load_reasoning_config() == {"enabled": False}
-

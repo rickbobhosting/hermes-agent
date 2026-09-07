@@ -6,6 +6,8 @@ export interface ProfileContextValue {
   profile: string;
   /** The profile the dashboard process itself runs under. */
   currentProfile: string;
+  /** Whether the dashboard/active profile bootstrap has settled. */
+  ready: boolean;
   /** Known profile names (includes "default"). */
   profiles: string[];
   setProfile: (name: string) => void;
@@ -14,6 +16,7 @@ export interface ProfileContextValue {
 export const ProfileContext = createContext<ProfileContextValue>({
   profile: "",
   currentProfile: "default",
+  ready: false,
   profiles: [],
   setProfile: () => {},
 });

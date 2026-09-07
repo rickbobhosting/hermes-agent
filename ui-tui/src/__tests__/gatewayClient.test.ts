@@ -1,3 +1,6 @@
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 interface ListenerEntry {
@@ -95,7 +98,10 @@ const { FakeWebSocket } = vi.hoisted(() => {
   return { FakeWebSocket }
 })
 
+const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
+
 vi.mock('undici', () => ({ WebSocket: FakeWebSocket }))
+vi.mock('node:child_process', () => ({ spawn: spawnMock }))
 
 import {
   GatewayClient,
@@ -114,6 +120,7 @@ describe('GatewayClient websocket attach mode', () => {
     originalGatewayUrl = process.env.HERMES_TUI_GATEWAY_URL
     originalSidecarUrl = process.env.HERMES_TUI_SIDECAR_URL
     FakeWebSocket.reset()
+    spawnMock.mockReset()
     ;(globalThis as { WebSocket?: unknown }).WebSocket = FakeWebSocket as unknown as typeof WebSocket
   })
 
@@ -309,6 +316,162 @@ describe('GatewayClient websocket attach mode', () => {
     })
 
     gw.kill()
+  })
+
+  it.each([
+    'ws://gateway.test/api/pub?token=insecure-secret&channel=demo',
+    'ws://gateway.test/api/pub?internal=gated-secret&channel=demo'
+  ])('replays only the latest local active session when spawned sidecar opens late (%s)', sidecarUrl => {
+    delete process.env.HERMES_TUI_GATEWAY_URL
+    process.env.HERMES_TUI_SIDECAR_URL = sidecarUrl
+
+    const child = Object.assign(new EventEmitter(), {
+      exitCode: null,
+      killed: false,
+      kill: vi.fn(() => true),
+      pid: 4242,
+      signalCode: null,
+      stderr: new PassThrough(),
+      stdin: new PassThrough(),
+      stdout: new PassThrough()
+    })
+
+    spawnMock.mockReturnValue(child)
+    const gw = new GatewayClient()
+
+    gw.start()
+
+    expect(spawnMock).toHaveBeenCalledOnce()
+    expect(spawnMock.mock.calls[0]?.[2]?.env?.HERMES_TUI_SIDECAR_URL).toBe(sidecarUrl)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+
+    gw.publishLocalEvent({
+      payload: { session_key: 'session-a' },
+      session_id: 'runtime-a',
+      type: 'dashboard.active_session_changed'
+    })
+    gw.publishLocalEvent({
+      payload: { session_key: 'session-b' },
+      session_id: 'runtime-b',
+      type: 'dashboard.active_session_changed'
+    })
+
+    const sidecarSocket = FakeWebSocket.instances[0]!
+
+    expect(sidecarSocket.sent).toEqual([])
+    sidecarSocket.open()
+    expect(sidecarSocket.sent).toHaveLength(1)
+    expect(JSON.parse(sidecarSocket.sent[0] ?? '{}').params).toMatchObject({
+      payload: { session_key: 'session-b' },
+      session_id: 'runtime-b',
+      type: 'dashboard.active_session_changed'
+    })
+
+    gw.kill()
+  })
+
+  it('reconnects a dropped spawned sidecar with backoff and cancels on kill', () => {
+    vi.useFakeTimers()
+
+    try {
+      delete process.env.HERMES_TUI_GATEWAY_URL
+      process.env.HERMES_TUI_SIDECAR_URL = 'ws://gateway.test/api/pub?internal=gated-secret&channel=demo'
+
+      const child = Object.assign(new EventEmitter(), {
+        exitCode: null,
+        killed: false,
+        kill: vi.fn(() => true),
+        pid: 4242,
+        signalCode: null,
+        stderr: new PassThrough(),
+        stdin: new PassThrough(),
+        stdout: new PassThrough()
+      })
+
+      spawnMock.mockReturnValue(child)
+      const gw = new GatewayClient()
+
+      gw.start()
+      const first = FakeWebSocket.instances[0]!
+
+      first.close(1011)
+      gw.publishLocalEvent({
+        payload: { session_key: 'latest-while-disconnected' },
+        type: 'dashboard.active_session_changed'
+      })
+      vi.advanceTimersByTime(249)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      vi.advanceTimersByTime(1)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+
+      const second = FakeWebSocket.instances[1]!
+
+      second.close(1011)
+      vi.advanceTimersByTime(499)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      vi.advanceTimersByTime(1)
+      expect(FakeWebSocket.instances).toHaveLength(3)
+
+      const third = FakeWebSocket.instances[2]!
+
+      third.open()
+      expect(JSON.parse(third.sent[0] ?? '{}').params.payload).toEqual({
+        session_key: 'latest-while-disconnected'
+      })
+
+      gw.kill()
+      vi.advanceTimersByTime(20_000)
+      expect(FakeWebSocket.instances).toHaveLength(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retires a sidecar on send failure and replays focus after reconnect', () => {
+    vi.useFakeTimers()
+
+    try {
+      delete process.env.HERMES_TUI_GATEWAY_URL
+      process.env.HERMES_TUI_SIDECAR_URL = 'ws://gateway.test/api/pub?token=secret&channel=demo'
+
+      const child = Object.assign(new EventEmitter(), {
+        exitCode: null,
+        killed: false,
+        kill: vi.fn(() => true),
+        pid: 4242,
+        signalCode: null,
+        stderr: new PassThrough(),
+        stdin: new PassThrough(),
+        stdout: new PassThrough()
+      })
+
+      spawnMock.mockReturnValue(child)
+      const gw = new GatewayClient()
+
+      gw.start()
+      const failed = FakeWebSocket.instances[0]!
+
+      failed.open()
+      vi.spyOn(failed, 'send').mockImplementationOnce(() => {
+        throw new Error('send failed without close event')
+      })
+      gw.publishLocalEvent({
+        payload: { session_key: 'preserved-focus' },
+        type: 'dashboard.active_session_changed'
+      })
+
+      vi.advanceTimersByTime(250)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      const replacement = FakeWebSocket.instances[1]!
+
+      replacement.open()
+      expect(JSON.parse(replacement.sent[0] ?? '{}').params.payload).toEqual({
+        session_key: 'preserved-focus'
+      })
+      gw.kill()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('emits exit when attached websocket closes', async () => {

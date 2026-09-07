@@ -198,6 +198,8 @@ export interface SessionInfo {
   project?: null | ProjectInfo
   reasoning_effort?: string
   release_date?: string
+  session_key?: string
+  stored_session_id?: string
   service_tier?: string
   skills: Record<string, string[]>
   system_prompt?: string

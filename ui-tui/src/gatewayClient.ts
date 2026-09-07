@@ -20,6 +20,8 @@ const WS_CONNECTING = 0
 const WS_OPEN = 1
 const WS_CLOSING = 2
 const WS_CLOSED = 3
+const SIDECAR_RECONNECT_BASE_MS = 250
+const SIDECAR_RECONNECT_MAX_MS = 8000
 
 // Keepalive + dead-connection detection. A silent drop (macOS sleep, proxy
 // idle timeout, VPN reconnect) kills the TCP socket without a `close` event,
@@ -150,6 +152,10 @@ export class GatewayClient extends EventEmitter {
   private sidecarWs: WebSocket | null = null
   private attachUrl: null | string = null
   private sidecarUrl: null | string = null
+  private pendingActiveSessionFrame: null | string = null
+  private sidecarGeneration = 0
+  private sidecarReconnectAttempt = 0
+  private sidecarReconnectTimer: null | ReturnType<typeof setTimeout> = null
   private reqId = 0
   private logs = new CircularBuffer<string>(MAX_GATEWAY_LOG_LINES)
   private pending = new Map<string, Pending>()
@@ -206,13 +212,27 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  private closeSidecarSocket() {
+  private stopSidecarMirror({ clearPending = false } = {}) {
+    this.sidecarGeneration += 1
+    this.sidecarReconnectAttempt = 0
+
+    if (this.sidecarReconnectTimer) {
+      clearTimeout(this.sidecarReconnectTimer)
+      this.sidecarReconnectTimer = null
+    }
+
+    const ws = this.sidecarWs
+
+    this.sidecarWs = null
+
     try {
-      this.sidecarWs?.close()
+      ws?.close()
     } catch {
       // best effort
-    } finally {
-      this.sidecarWs = null
+    }
+
+    if (clearPending) {
+      this.pendingActiveSessionFrame = null
     }
   }
 
@@ -376,7 +396,7 @@ export class GatewayClient extends EventEmitter {
 
   private handleTransportExit(code: null | number, reason?: string) {
     this.clearReadyTimer()
-    this.closeSidecarSocket()
+    this.stopSidecarMirror({ clearPending: true })
     this.lifecycle(`[lifecycle] transport exit code=${code ?? 'null'} reason=${reason ?? 'none'}`)
     this.rejectPending(new Error(reason || `gateway exited${code === null ? '' : ` (${code})`}`))
 
@@ -395,11 +415,38 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  private connectSidecarMirror() {
-    this.closeSidecarSocket()
+  private retireSidecarSocket(ws: WebSocket, generation: number) {
+    if (this.sidecarWs !== ws || generation !== this.sidecarGeneration) {
+      return
+    }
 
+    this.sidecarWs = null
+
+    try {
+      ws.close()
+    } catch {
+      // best effort
+    }
+
+    this.scheduleSidecarReconnect(generation)
+  }
+
+  private connectSidecarMirror(generation = this.sidecarGeneration) {
     if (!this.sidecarUrl) {
       return
+    }
+
+    if (
+      generation !== this.sidecarGeneration ||
+      this.sidecarWs?.readyState === WS_CONNECTING ||
+      this.sidecarWs?.readyState === WS_OPEN
+    ) {
+      return
+    }
+
+    if (this.sidecarReconnectTimer) {
+      clearTimeout(this.sidecarReconnectTimer)
+      this.sidecarReconnectTimer = null
     }
 
     const WebSocketCtor = getWebSocketCtor()
@@ -414,38 +461,106 @@ export class GatewayClient extends EventEmitter {
       const ws = new WebSocketCtor(this.sidecarUrl)
 
       this.sidecarWs = ws
+      ws.addEventListener(
+        'open',
+        () => {
+          if (this.sidecarWs !== ws || generation !== this.sidecarGeneration) {
+            return
+          }
+
+          this.sidecarReconnectAttempt = 0
+          const pending = this.pendingActiveSessionFrame
+
+          if (!pending) {
+            return
+          }
+
+          try {
+            ws.send(pending)
+
+            if (this.pendingActiveSessionFrame === pending) {
+              this.pendingActiveSessionFrame = null
+            }
+          } catch {
+            // Keep the latest focus frame queued for the next sidecar open.
+            this.retireSidecarSocket(ws, generation)
+          }
+        },
+        { once: true }
+      )
       ws.addEventListener('close', () => {
-        if (this.sidecarWs === ws) {
-          this.sidecarWs = null
-        }
+        this.retireSidecarSocket(ws, generation)
       })
       ws.addEventListener('error', () => {
         this.pushLog('[sidecar] mirror connection error')
+        this.retireSidecarSocket(ws, generation)
       })
     } catch (err) {
       this.pushLog(`[sidecar] failed to connect ${redactUrl(this.sidecarUrl)} (constructor error)`)
       this.sidecarWs = null
+      this.scheduleSidecarReconnect(generation)
     }
   }
 
-  private mirrorEventToSidecar(rawFrame: string) {
+  private scheduleSidecarReconnect(generation: number) {
+    if (
+      !this.sidecarUrl ||
+      generation !== this.sidecarGeneration ||
+      this.sidecarReconnectTimer ||
+      this.sidecarWs
+    ) {
+      return
+    }
+
+    const delay = Math.min(
+      SIDECAR_RECONNECT_MAX_MS,
+      SIDECAR_RECONNECT_BASE_MS * 2 ** this.sidecarReconnectAttempt
+    )
+
+    this.sidecarReconnectAttempt += 1
+    this.sidecarReconnectTimer = setTimeout(() => {
+      this.sidecarReconnectTimer = null
+
+      if (generation === this.sidecarGeneration) {
+        this.connectSidecarMirror(generation)
+      }
+    }, delay)
+    this.sidecarReconnectTimer.unref?.()
+  }
+
+  private mirrorEventToSidecar(rawFrame: string): boolean {
     const ws = this.sidecarWs
 
     if (!ws || ws.readyState !== WS_OPEN) {
-      return
+      return false
     }
 
     try {
       ws.send(rawFrame)
+
+      return true
     } catch {
-      // best effort
+      this.retireSidecarSocket(ws, this.sidecarGeneration)
+
+      return false
     }
   }
 
   publishLocalEvent(ev: GatewayEvent) {
     const frame = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: ev })
 
-    this.mirrorEventToSidecar(frame)
+    if (ev.type === 'dashboard.active_session_changed') {
+      // Focus can change before the sidecar socket reaches OPEN. Retain only
+      // the latest identity event; arbitrary event history stays unbuffered.
+      this.pendingActiveSessionFrame = frame
+    }
+
+    const mirrored = this.mirrorEventToSidecar(frame)
+
+    if (mirrored && this.pendingActiveSessionFrame === frame) {
+      this.pendingActiveSessionFrame = null
+    }
+
     this.publish(ev)
   }
 
@@ -486,6 +601,11 @@ export class GatewayClient extends EventEmitter {
     this.startReadyTimer(python, cwd)
     this.proc = spawn(python, ['-m', 'tui_gateway.entry'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
     this.lifecycle(`[lifecycle] spawned gateway child ${describeChild(this.proc)} python=${python} cwd=${cwd}`)
+    // Spawned mode receives gateway events over child stdout, so this socket
+    // is only for TUI-local dashboard events (notably active-session focus).
+    // The child still receives the sidecar URL in its captured spawn env and
+    // consumes it before building an agent, preserving Python event mirroring.
+    this.connectSidecarMirror()
 
     this.stdoutRl = createInterface({ input: this.proc.stdout! })
     this.stdoutRl.on('line', raw => {
@@ -675,7 +795,7 @@ export class GatewayClient extends EventEmitter {
 
     this.proc = null
     this.closeGatewaySocket()
-    this.closeSidecarSocket()
+    this.stopSidecarMirror({ clearPending: true })
 
     if (attachUrl) {
       this.startAttachedGateway(attachUrl)
@@ -933,7 +1053,7 @@ export class GatewayClient extends EventEmitter {
       `[lifecycle] GatewayClient.kill reason=${reason} ${describeChild(proc)} killResult=${killed ?? 'none'}`
     )
     this.closeGatewaySocket()
-    this.closeSidecarSocket()
+    this.stopSidecarMirror({ clearPending: true })
     this.clearReadyTimer()
     // The ws 'close' handler is identity-gated on `this.ws === ws`
     // and we just nulled `this.ws`, so it will short-circuit and

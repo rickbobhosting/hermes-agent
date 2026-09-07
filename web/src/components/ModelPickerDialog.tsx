@@ -431,7 +431,7 @@ export function ModelPickerDialog(props: Props) {
         <footer className="border-t border-border p-3 flex items-center justify-between gap-3 flex-wrap">
           {alwaysGlobal ? (
             <span className="text-xs text-muted-foreground">
-              Saves to config.yaml — applies to new sessions.
+              Saves to config.yaml — applies to eligible future turns and sessions.
             </span>
           ) : (
             <div className="flex items-center gap-2">

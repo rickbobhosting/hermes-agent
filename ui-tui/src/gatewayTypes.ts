@@ -184,6 +184,7 @@ export interface SystemBatteryResponse {
 export interface SessionCreateResponse {
   info?: SessionInfo & { config_warning?: string; credential_warning?: string }
   session_id: string
+  stored_session_id?: string
 }
 
 export interface SessionResumeResponse {
@@ -194,6 +195,7 @@ export interface SessionResumeResponse {
   resumed?: string
   running?: boolean
   session_id: string
+  session_key?: string
   started_at?: number
   status?: LiveSessionStatus
 }
@@ -659,6 +661,7 @@ export type GatewayEvent =
       type: 'wake.detected'
     }
   | { payload?: { reason?: string }; session_id?: string; type: 'dashboard.new_session_requested' }
+  | { payload: { session_key: string }; session_id?: string; type: 'dashboard.active_session_changed' }
   | { payload: { line: string }; session_id?: string; type: 'gateway.stderr' }
   | { payload?: { attempt?: number; delay_ms?: number }; session_id?: string; type: 'gateway.reconnecting' }
   | {

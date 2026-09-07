@@ -387,6 +387,13 @@ export const api = {
       ),
     );
   },
+  getRetainedPtySessions: () =>
+    fetchJSON<RetainedPtySessionsResponse>("/api/pty/sessions"),
+  stopRetainedPtySession: (id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/pty/sessions/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
   getSessionMessages: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionMessagesResponse>(
       appendProfileParam(
@@ -1965,6 +1972,26 @@ export interface PaginatedSessions {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface RetainedPtySession {
+  /** Opaque public management id. This is not the secret attach token. */
+  id: string;
+  alive: boolean;
+  attached: boolean;
+  created_at: number;
+  last_attached_at: number | null;
+  last_detached_at: number | null;
+  buffer_bytes: number;
+  buffer_truncated: boolean;
+  metadata: {
+    profile?: string | null;
+    resume?: string | null;
+  };
+}
+
+export interface RetainedPtySessionsResponse {
+  sessions: RetainedPtySession[];
 }
 
 export interface EnvVarInfo {

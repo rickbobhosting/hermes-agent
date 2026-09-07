@@ -594,7 +594,7 @@ def test_accounts_offers_every_oauth_provider_from_catalog():
 
 
 def test_oauth_catalog_marks_external_providers_not_disconnectable():
-    """External CLI credentials are visible in Accounts but cannot be removed by Hermes."""
+    """External CLI credentials visible in Accounts cannot be removed by Hermes."""
     resp = client.get("/api/providers/oauth", headers=HEADERS)
     assert resp.status_code == 200, resp.text
     providers = {p["id"]: p for p in resp.json()["providers"]}
@@ -606,14 +606,25 @@ def test_oauth_catalog_marks_external_providers_not_disconnectable():
     assert "provider's CLI" in providers["qwen-oauth"]["disconnect_hint"]
     assert providers["qwen-oauth"]["disconnect_command"] is None
 
-    # Claude Code: still not API-disconnectable, but we hand the GUI a runnable
-    # command (clears the keychain entry / credentials file) so it can offer a
-    # one-click "run in terminal" disconnect.
-    assert providers["claude-code"]["flow"] == "external"
-    assert providers["claude-code"]["disconnectable"] is False
-    assert providers["claude-code"]["disconnect_hint"]
-    cmd = providers["claude-code"]["disconnect_command"]
-    assert cmd and ".claude/.credentials.json" in cmd
+
+
+def test_accounts_hides_claude_code_external_credentials(monkeypatch):
+    """Accounts neither reports nor reads credentials owned by Claude Code."""
+    from agent import anthropic_credentials
+
+    def fail_read():
+        raise AssertionError("Accounts must not inspect Claude Code credentials")
+
+    monkeypatch.setattr(anthropic_credentials, "read_claude_code_credentials", fail_read)
+
+    resp = client.get("/api/providers/oauth", headers=HEADERS)
+    assert resp.status_code == 200, resp.text
+    providers = {p["id"]: p for p in resp.json()["providers"]}
+    assert "claude-code" not in providers
+
+    delete_resp = client.delete("/api/providers/oauth/claude-code", headers=HEADERS)
+    assert delete_resp.status_code == 400, delete_resp.text
+    assert "Unknown provider" in delete_resp.text
 
 
 def test_external_oauth_disconnect_rejected_before_auth_mutation(monkeypatch):
@@ -775,7 +786,5 @@ def test_status_falls_through_to_generic_dispatcher_for_catalog_only_provider():
     assert out["token_preview"] and "sk-future-secret-token-xyz" not in out["token_preview"]
     assert out["expires_at"] == "2026-12-01T00:00:00Z"
     assert out["has_refresh_token"] is True
-
-
 
 

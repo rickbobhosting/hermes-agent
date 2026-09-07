@@ -11,9 +11,9 @@
  * (the same key the TUI's `/reasoning <level>` command and the desktop radio
  * write). We read the whole config and write it back — the established
  * single-key pattern on the dashboard (see ConfigPage) — so the value lands in
- * the config the agent boots a fresh chat from. As with the model picker, the
- * running chat session adopts the change on the next `/new` or page reload;
- * we surface that hint rather than forcing a reload here.
+ * the config used for eligible future turns or sessions. Running chats can
+ * differ, so callers surface cautious lifecycle guidance rather than promising
+ * an in-place reasoning hot reload.
  *
  * Profile scoping: the sidebar passes the chat profile explicitly, so this
  * reads/writes the same config the chat PTY was launched from.

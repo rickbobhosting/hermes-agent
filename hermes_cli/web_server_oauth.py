@@ -1,5 +1,5 @@
 """Dashboard OAuth/login-status helpers: provider catalog, per-provider device pollers,
-Anthropic/Copilot/Claude-Code status probes.
+and Anthropic/Copilot status probes.
 """
 
 import logging
@@ -43,8 +43,9 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
     """Status for the "Anthropic API Key" card: Hermes-managed PKCE file first, then the
     registry-ordered env vars (process env — where Bitwarden-sourced secrets land — then .env).
 
-    Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read here; it has its own
-    ``claude-code`` entry, and counting it here would shadow a real ANTHROPIC_API_KEY.
+    Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read here. It is owned by
+    Claude Code, not Hermes, and should not be shown as a dashboard-managed OAuth account.
+    Counting it here would also shadow a real ANTHROPIC_API_KEY.
     """
     try:
         from agent.anthropic_credentials import read_hermes_oauth_credentials, _get_hermes_oauth_file
@@ -69,18 +70,6 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
                 "logged_in": True, "source": "env_var", "source_label": f"{var}{format_secret_source_suffix(var)}",
                 "token_preview": _truncate_token(value), "expires_at": None, "has_refresh_token": False,
             }
-    return dict(_LOGGED_OUT)
-
-
-def _claude_code_only_status() -> Dict[str, Any]:
-    """Claude Code CLI credentials as their own entry, independent of the Anthropic card."""
-    try:
-        from agent.anthropic_credentials import read_claude_code_credentials
-        creds = read_claude_code_credentials()
-    except Exception:
-        creds = None
-    if creds and creds.get("accessToken"):
-        return _token_status("claude_code_cli", "~/.claude/.credentials.json", creds)
     return dict(_LOGGED_OUT)
 
 
@@ -130,8 +119,9 @@ def _external_process_cli_command(provider_id: str, default: str) -> str:
 # Hand-tuned OAuth/account cards: the bits not derivable from the unified provider catalog
 # (``flow``, ``status_fn``, ``cli_command``, display order). OVERRIDE BASE for
 # ``_build_oauth_catalog()``, which unions them with every accounts-tab provider so new
-# providers appear automatically. Also carries two non-catalog rows the Accounts tab needs:
-# the Anthropic credential-status card and the synthetic ``claude-code`` row.
+# providers appear automatically. Also carries the non-catalog Anthropic credential-status card
+# that the Accounts tab needs. Claude Code's external credentials are intentionally not displayed
+# as a Hermes-managed account.
 # ``flow``: ``device_code`` = show code + URL + poll; ``external`` = delegated to a terminal/CLI.
 _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     # status_fn None → dispatched via auth.get_<provider>_auth_status.
@@ -155,15 +145,12 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     # (slash-commands only exist inside an interactive session).
     {"id": "copilot-acp", "name": "GitHub Copilot (ACP)", "flow": "external", "cli_command": "copilot login",
      "docs_url": "https://docs.github.com/en/copilot", "status_fn": _copilot_acp_status},
-    # Anthropic / Claude entries sit at the bottom. Deliberately flow == "external": an
+    # Anthropic sits at the bottom. Deliberately flow == "external": an
     # in-dashboard Connect button would let a scriptable HTTP endpoint mint Claude Pro/Max
     # subscription tokens outside Anthropic's own client, against its OAuth usage policies.
     # Login works via the terminal (`hermes auth add anthropic`) or a plain API key.
     {"id": "anthropic", "name": "Anthropic API Key", "flow": "external", "cli_command": "hermes auth add anthropic",
      "docs_url": "https://docs.claude.com/en/api/getting-started", "status_fn": _anthropic_oauth_status},
-    {"id": "claude-code", "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
-     "flow": "external", "cli_command": "claude setup-token",
-     "docs_url": "https://docs.claude.com/en/docs/claude-code", "status_fn": _claude_code_only_status},
 )
 _oauth_sessions: Dict[str, Dict[str, Any]] = {}
 _oauth_sessions_lock = threading.Lock()

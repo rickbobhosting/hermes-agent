@@ -191,7 +191,7 @@ class _FileLock:
         self._fh = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._fh = open(self.path, "a+b")
         try:
             _flock(self._fh, lock=True)
@@ -280,10 +280,14 @@ def _valid_process_start(v: Any) -> bool:
 
 
 def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # Ownership state exposes live conversation identifiers. Create the
+        # replacement owner-only even under a permissive umask; os.replace
+        # then repairs the mode of older registries as well.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"entries": entries}, fh, sort_keys=True)
         os.replace(tmp, path)
     finally:
@@ -307,7 +311,8 @@ def _optional_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -324,11 +329,16 @@ def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = F
         return unknown_dead
     try:
         from gateway.status import _pid_exists
-        exists = bool(_pid_exists(pid_int))
+        exists = _pid_exists(pid_int)
     except Exception:
-        return unknown_dead
-    if not exists:
-        return False
+        # A transient probe/import failure is not evidence that the owner died.
+        # Ordinary TUI leases use the lenient path, where pruning here would
+        # admit a concurrent writer to the same persisted conversation.
+        return True if lenient else None
+    if exists is not True:
+        if exists is False:
+            return False
+        return True if lenient else None
     expected_start = _optional_float(process_start_time)
     if expected_start is None:
         return True
@@ -569,6 +579,14 @@ def transfer_active_session(
         if loaded is None:
             return False
         entries = loaded[1]
+        if any(
+            str(entry.get("lease_id") or "") != lease.lease_id
+            and str(entry.get("session_id") or "") == new_session_id
+            for entry in entries
+        ):
+            # Collision refusal is atomic with the transfer. Keep the old
+            # reservation and metadata intact rather than creating two owners.
+            return False
         own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
         if own is not None:
             own["session_id"] = new_session_id

@@ -14,6 +14,11 @@ import {
   signalFreshSessionBoundary,
   writeActiveSessionFile
 } from '../app/useSessionLifecycle.js'
+import {
+  sessionActivateBreadcrumbKey,
+  sessionCreateBreadcrumbKey,
+  sessionResumeBreadcrumbKey
+} from '../lib/activeSessionFile.js'
 
 describe('fresh session boundary', () => {
   it('signals only when a live session is replaced by a different session', () => {
@@ -46,6 +51,21 @@ describe('writeActiveSessionFile', () => {
     writeActiveSessionFile('actual_session', path)
 
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ session_id: 'actual_session' })
+  })
+
+  it('prefers the persistent create id over the gateway runtime id', () => {
+    expect(
+      sessionCreateBreadcrumbKey({ session_id: 'runtime01', stored_session_id: '20260906_persisted' })
+    ).toBe('20260906_persisted')
+    expect(sessionCreateBreadcrumbKey({ session_id: 'runtime01' })).toBe('runtime01')
+  })
+
+  it('uses persistent keys for activate and resume focus transitions', () => {
+    const base = { messages: [], session_id: 'runtime01' }
+
+    expect(sessionActivateBreadcrumbKey({ ...base, session_key: 'activated-stored' })).toBe('activated-stored')
+    expect(sessionResumeBreadcrumbKey({ ...base, resumed: 'resumed-stored' })).toBe('resumed-stored')
+    expect(sessionResumeBreadcrumbKey({ ...base, resumed: 'old', session_key: 'latest-stored' })).toBe('latest-stored')
   })
 })
 

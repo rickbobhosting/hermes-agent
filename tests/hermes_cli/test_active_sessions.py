@@ -646,3 +646,43 @@ def test_liveness_guard_keeps_a_just_acquired_own_lease_it_cannot_vouch_for(
     ) as active:
         assert active is False
     assert active_sessions.active_session_registry_snapshot(home) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_registry_replacement_is_owner_only(tmp_path):
+    path = tmp_path / "runtime" / "active_sessions.json"
+    active_sessions._write_entries(path, [])
+    assert path.stat().st_mode & 0o777 == 0o600
+    path.chmod(0o644)
+    active_sessions._write_entries(path, [])
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_transfer_collision_keeps_both_existing_owners(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    first, _ = active_sessions.try_acquire_active_session(
+        session_id="first", surface="tui", config={}
+    )
+    second, _ = active_sessions.try_acquire_active_session(
+        session_id="second", surface="tui", config={}
+    )
+    assert first is not None and second is not None
+    before = active_sessions.active_session_registry_snapshot()
+    try:
+        assert not active_sessions.transfer_active_session(first, session_id="second")
+        assert first.session_id == "first"
+        assert active_sessions.active_session_registry_snapshot() == before
+    finally:
+        first.release()
+        second.release()
+
+
+@pytest.mark.parametrize("probe", [None, RuntimeError("transient")])
+def test_lenient_pid_probe_uncertainty_retains_owner(monkeypatch, probe):
+    def _probe(_pid):
+        if isinstance(probe, Exception):
+            raise probe
+        return probe
+
+    monkeypatch.setattr("gateway.status._pid_exists", _probe)
+    assert active_sessions._pid_liveness(os.getpid(), lenient=True) is True

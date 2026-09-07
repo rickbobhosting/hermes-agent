@@ -18,7 +18,7 @@ import struct
 import sys
 import termios
 import time
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 try:
     import ptyprocess  # type: ignore
@@ -42,6 +42,9 @@ PTY_HOST_DASHBOARD = "dashboard"
 _MIN_DIMENSION = 1
 _MAX_COLS = 2000
 _MAX_ROWS = 1000
+_TERMINATION_GRACE_SECONDS = 0.5
+_WRITE_POLL_SECONDS = 0.02
+_DEFAULT_WRITE_TIMEOUT_SECONDS = 1.0
 
 
 def _clamp_dimension(value: int, maximum: int) -> int:
@@ -62,10 +65,11 @@ class PtyUnavailableError(RuntimeError):
 
 
 class PtyBridge:
-    """Thin wrapper around ``ptyprocess.PtyProcess`` for byte streaming. Not thread-safe: owned by
-    the WebSocket handler that spawned it; reads run in an executor thread, writes are awaited on
-    the loop. The master fd is non-blocking so input backpressure suspends only the owning
-    WebSocket task, never the dashboard event loop.
+    """Byte-streaming PTY owned by one server-side session.
+
+    Reads run in an executor. Writes use the event loop and only issue
+    ``O_NONBLOCK`` syscalls between awaits, so backpressure cannot stall the
+    dashboard and attachment-generation transitions stay linearizable.
     """
 
     def __init__(self, proc: "ptyprocess.PtyProcess"):  # type: ignore[name-defined]
@@ -73,6 +77,22 @@ class PtyBridge:
         self._fd: int = proc.fd
         self._closed = False
         os.set_blocking(self._fd, False)
+        # Capture the process group while the leader exists. The TUI may exit
+        # before its gateway/helper descendants, after which getpgid(pid) can
+        # no longer recover the group that Stop must terminate.
+        try:
+            pgid = os.getpgid(proc.pid)  # windows-footgun: ok — POSIX-only module
+        except ProcessLookupError:
+            pgid = int(proc.pid)
+        except OSError:
+            pgid = None
+        try:
+            own_pgid = os.getpgrp()
+        except OSError:
+            own_pgid = None
+        self._pgid = (
+            pgid if isinstance(pgid, int) and pgid > 0 and pgid != own_pgid else None
+        )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -164,23 +184,30 @@ class PtyBridge:
             except (OSError, ValueError):
                 pass
 
-    async def write(self, data: bytes, *, timeout: float = 10.0) -> bool:
-        """Write all raw bytes without ever blocking the dashboard event loop.
+    async def write(
+        self,
+        data: bytes,
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+        timeout: float = _DEFAULT_WRITE_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Write all raw bytes with bounded, cancellable backpressure.
 
-        Returns ``False`` when the bridge closes or the child leaves its input
-        buffer full for ``timeout`` seconds. Callers can then recycle only the
-        affected terminal session while the rest of the dashboard stays live.
+        Returns ``False`` when the bridge closes, ownership is revoked, or the
+        child leaves its input buffer full for ``timeout`` seconds. No await
+        occurs between the last cancellation check and each nonblocking write,
+        so a superseded controller cannot write after its generation changes.
         """
-        if self._closed:
+        if self._closed or not data:
+            return not data
+        if timeout <= 0:
             return False
-        if not data:
-            return True
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout)
         view = memoryview(data)
         while view:
-            if self._closed:
+            if self._closed or (cancelled is not None and cancelled()):
                 return False
             try:
                 n = os.write(self._fd, view)
@@ -200,8 +227,11 @@ class PtyBridge:
                 continue
 
             remaining = deadline - loop.time()
-            if not await self._wait_writable(remaining):
+            # Poll in short bounded slices so Stop/supersede cancellation is
+            # observed promptly even while the fd remains non-writable.
+            if remaining <= 0:
                 return False
+            await self._wait_writable(min(_WRITE_POLL_SECONDS, remaining))
         return True
 
     def resize(self, cols: int, rows: int) -> None:
@@ -221,33 +251,72 @@ class PtyBridge:
             pass
 
     def close(self) -> None:
-        """Terminate the child (SIGHUP → SIGTERM → SIGKILL, 0.5s grace each), reap it so the
-        dashboard process never leaks zombies, and close fds. Idempotent.
-        """
+        """Terminate the owned process group and close descriptors."""
         if self._closed:
             return
         self._closed = True
 
+        pgid = getattr(self, "_pgid", None)
+        if pgid is None:
+            try:
+                pgid = os.getpgid(self._proc.pid)  # windows-footgun: ok — POSIX-only module
+            except Exception:
+                pgid = None
         try:
-            pgid = os.getpgid(self._proc.pid)  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-        except Exception:
+            if pgid == os.getpgrp():
+                pgid = None
+        except OSError:
             pgid = None
 
-        # Signal the whole process group, not just the PTY leader: the dashboard TUI starts helper
-        # children (e.g. the Python slash worker) and killing only the leader strands them.
-        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-            if not self._proc.isalive():
-                break
+        def _leader_alive() -> bool:
             try:
-                if pgid is not None:
-                    os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-                else:
-                    self._proc.kill(sig)
+                return bool(self._proc.isalive())
             except Exception:
-                pass
-            deadline = time.monotonic() + 0.5
-            while self._proc.isalive() and time.monotonic() < deadline:
-                time.sleep(0.02)
+                return False
+
+        def _group_alive() -> bool:
+            if pgid is None:
+                return False
+            try:
+                os.killpg(pgid, 0)  # windows-footgun: ok — POSIX-only module
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError as exc:
+                return exc.errno != errno.ESRCH
+            return True
+
+        if pgid is not None:
+            for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+                _leader_alive()  # reap cached leader status when ptyprocess tracks it
+                try:
+                    os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only module
+                except ProcessLookupError:
+                    break
+                except Exception:
+                    pass
+                deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+                while time.monotonic() < deadline:
+                    _leader_alive()
+                    if not _group_alive():
+                        break
+                    time.sleep(0.02)
+                if not _group_alive():
+                    break
+        else:
+            # Never group-signal if a fake/misconfigured process reports the
+            # dashboard's own PGID. Fall back to the exact leader instead.
+            for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+                if not _leader_alive():
+                    break
+                try:
+                    self._proc.kill(sig)
+                except Exception:
+                    pass
+                deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+                while _leader_alive() and time.monotonic() < deadline:
+                    time.sleep(0.02)
 
         try:
             self._proc.close(force=True)

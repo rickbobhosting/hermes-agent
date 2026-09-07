@@ -1,5 +1,3 @@
-import { writeFileSync } from 'node:fs'
-
 import type { ScrollBoxHandle } from '@hermes/ink'
 import { evictInkCaches } from '@hermes/ink'
 import { type RefObject, useCallback, useEffect, useMemo, useRef } from 'react'
@@ -17,6 +15,12 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import {
+  publishDashboardActiveSession,
+  sessionActivateBreadcrumbKey,
+  sessionCreateBreadcrumbKey,
+  sessionResumeBreadcrumbKey
+} from '../lib/activeSessionFile.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
@@ -27,6 +31,7 @@ import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
+export { writeActiveSessionFile } from '../lib/activeSessionFile.js'
 export { refreshSessionView, scheduleResumeScrollToBottom } from './sessionResumeView.js'
 
 const usageFrom = (info: null | SessionInfo): Usage => (info?.usage ? { ...ZERO, ...info.usage } : ZERO)
@@ -41,18 +46,6 @@ const statusFromLiveSession = (status?: string, running = false) => {
   }
 
   return running || status === 'working' ? 'running…' : 'ready'
-}
-
-export const writeActiveSessionFile = (sessionId: null | string, file = process.env.HERMES_TUI_ACTIVE_SESSION_FILE) => {
-  if (!file || !sessionId) {
-    return
-  }
-
-  try {
-    writeFileSync(file, JSON.stringify({ session_id: sessionId }), { mode: 0o600 })
-  } catch {
-    // Best-effort shell epilogue hint only; never break live session changes.
-  }
 }
 
 export const liveSessionInflightMessages = (inflight?: null | SessionInflightTurn): Msg[] => {
@@ -214,7 +207,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       resetSession()
       setSessionStartedAt(Date.now())
 
-      writeActiveSessionFile(r.session_id)
+      publishDashboardActiveSession(gw, sessionCreateBreadcrumbKey(r), r.session_id)
       patchUiState({
         info,
         sid: r.session_id,
@@ -267,7 +260,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       return r.session_id
     },
-    [closeSession, colsRef, onFreshSessionStarted, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, gw, onFreshSessionStarted, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const newSession = useCallback(
@@ -306,7 +299,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
           const transcript = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
           setHistoryItems(info ? [introMsg(info), ...transcript] : transcript)
-          writeActiveSessionFile(r.session_key ?? r.session_id)
+          publishDashboardActiveSession(gw, sessionActivateBreadcrumbKey(r), r.session_id)
           patchUiState({
             busy: running,
             info,
@@ -360,7 +353,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             const resumed = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
 
             setHistoryItems(info ? [introMsg(info), ...resumed] : resumed)
-            writeActiveSessionFile(r.resumed ?? r.session_id)
+            publishDashboardActiveSession(gw, sessionResumeBreadcrumbKey(r), r.session_id)
             patchUiState({
               busy: running,
               info,

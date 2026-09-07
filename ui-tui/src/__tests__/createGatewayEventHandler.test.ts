@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
@@ -65,6 +69,54 @@ describe('createGatewayEventHandler', () => {
     resetTurnState()
     turnController.fullReset()
     patchUiState({ showReasoning: true })
+  })
+
+  it('publishes a focused stored-session-key rotation from session.info', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-tui-active-'))
+    const path = join(dir, 'active.json')
+    const previousPath = process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+    const ctx = buildCtx([])
+    const publishLocalEvent = vi.fn()
+
+    ctx.gateway.gw.publishLocalEvent = publishLocalEvent
+    process.env.HERMES_TUI_ACTIVE_SESSION_FILE = path
+    patchUiState({ sid: 'runtime01' })
+
+    try {
+      const onEvent = createGatewayEventHandler(ctx)
+
+      onEvent({
+        payload: { model: 'test/model', session_key: 'stored-a', skills: {}, tools: {} },
+        session_id: 'runtime01',
+        type: 'session.info'
+      } as any)
+      onEvent({
+        payload: { model: 'test/model', stored_session_id: 'stored-b', skills: {}, tools: {} },
+        session_id: 'runtime01',
+        type: 'session.info'
+      } as any)
+      onEvent({
+        payload: { model: 'test/model', stored_session_id: 'background-c', skills: {}, tools: {} },
+        session_id: 'background02',
+        type: 'session.info'
+      } as any)
+
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ session_id: 'stored-b' })
+      expect(publishLocalEvent).toHaveBeenCalledTimes(2)
+      expect(publishLocalEvent).toHaveBeenLastCalledWith({
+        payload: { session_key: 'stored-b' },
+        session_id: 'runtime01',
+        type: 'dashboard.active_session_changed'
+      })
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+      } else {
+        process.env.HERMES_TUI_ACTIVE_SESSION_FILE = previousPath
+      }
+
+      rmSync(dir, { force: true, recursive: true })
+    }
   })
 
   it('archives incomplete todos into transcript flow at end of turn so they scroll up', () => {
