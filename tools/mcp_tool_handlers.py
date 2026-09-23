@@ -24,6 +24,10 @@ from tools.mcp_tool_errors import _is_auth_error, _is_session_expired_error
 logger = logging.getLogger("tools.mcp_tool")
 _MISSING = object()
 
+
+class _AttestedCallOutcomeUnknown(RuntimeError):
+    """Avoid echoing SDK exceptions that may contain the scoped bearer or proof."""
+
 _NEEDS_REAUTH_MSG = (
     "MCP server '{s}' requires re-authentication. Run `hermes mcp login {s}` (or delete the tokens file under "
     "~/.hermes/mcp-tokens/ and restart). Do NOT retry this tool — ask the user to re-authenticate.")
@@ -357,7 +361,7 @@ async def _track_inflight_rpc(server: Any, server_name: str, op: str, *, retry_s
             inflight.discard(task)
 
 
-async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict):
+async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict, meta=None):
     """``session.call_tool`` that fails fast when the stdio child is/gets dead: pre-call (a dead
     child must not hold the slot for the full timeout) and mid-call (race against
     ``_watch_stdio_children``). Both raise :class:`_StdioChildExited` for the respawn path, which
@@ -371,7 +375,10 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
             f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched",
             in_flight=False,
         )
-    _call_coro = server.session.call_tool(tool_name, arguments=args)
+    call_options = {"arguments": args}
+    if meta is not None:
+        call_options["meta"] = meta
+    _call_coro = server.session.call_tool(tool_name, **call_options)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
@@ -417,7 +424,7 @@ def _error_result_text(result) -> str:
     return "".join(str(t) for t in texts if t)
 
 
-def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
+def _render_content_blocks(result, server_name: str, *, native_images: bool = False) -> Tuple[str, int]:
     """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are
     materialized rather than silently dropped; unsupported blocks become an inline drop notice
     (kimi-code#3227). Returns ``(text, usable_parts)`` — the count of REAL rendered blocks
@@ -431,6 +438,18 @@ def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
     # (gnanirahulnutakki), both too stale to cherry-pick. #10848's approach (integrate with Hermes' MEDIA
     # tag + cache_image_from_bytes) was the cleaner of the two — plugs into existing infrastructure.
     for block in (result.content or []):
+        block_type = getattr(block, "type", None) or type(block).__name__
+        resource = getattr(block, "resource", None)
+        resource_mime = mcp_field(resource, "mime_type", "mimeType", "") if resource is not None else ""
+        link_mime = mcp_field(block, "mime_type", "mimeType", "")
+        if not native_images and (
+            block_type == "image"
+            or (getattr(resource, "blob", None) is not None and str(resource_mime).lower().startswith("image/"))
+            or (block_type == "resource_link" and str(link_mime).lower().startswith("image/"))
+        ):
+            parts.append("[MCP image omitted: enable native_images for this server to inspect it]")
+            usable_parts += 1  # Never fall back to structuredContent, which can contain the same bytes.
+            continue
         if getattr(block, "text", None):
             parts.append(strip_unicode_tags(block.text))
             if block.text.strip():
@@ -441,7 +460,6 @@ def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
             parts.append(rendered)
             usable_parts += 1
             continue
-        block_type = getattr(block, "type", None) or type(block).__name__
         if block_type in {"text", "resource", "audio", "image"}:  # benign empty render
             logger.debug("MCP %s: content block type %r rendered empty", server_name, block_type)
         else:
@@ -481,7 +499,7 @@ def _capped_structured_content(result):
     return _truncate_mcp_text_result(as_json) if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS else structured
 
 
-def _render_call_tool_result(result, server_name: str) -> str:
+def _render_call_tool_result(result, server_name: str, *, native_images: bool = False) -> str:
     """Pure: ``CallToolResult`` -> handler JSON. ``content`` and ``structuredContent`` are
     ALTERNATIVES, never both forwarded (kimi-code#3234): spec-following servers already render
     their data into content, so forwarding both sent it twice. content wins whenever it rendered
@@ -490,7 +508,7 @@ def _render_call_tool_result(result, server_name: str) -> str:
     servers working. ``_meta`` minus reserved keys is always surfaced."""
     if mcp_field(result, "is_error", "isError", False):
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
-    text_result, usable_parts = _render_content_blocks(result, server_name)
+    text_result, usable_parts = _render_content_blocks(result, server_name, native_images=native_images)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
     if structured is not None and usable_parts > 0:
@@ -525,29 +543,61 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         server, error = _acquire_call_server(server_name, tool_timeout)
         if server is None:
             return error
+        from tools.mcp_project_attestation import (
+            AttestationUnavailable, policy, proof, redact_host_material,
+        )
+
+        try:
+            config = getattr(server, "_config", {})
+            configured = policy(config)
+            if configured is not None and tool_name == configured["finish_tool"]:
+                return tool_error("This MCP turn closure is host-only")
+            meta = proof(config, tool_name, args) if (
+                configured is not None and tool_name in configured["tools"]
+            ) else None
+        except AttestationUnavailable as exc:
+            return tool_error(str(exc))
         # Only a tool annotated readOnlyHint=True is replayed after session expiry; a 401 is always
         # pre-dispatch so the auth recoverer keeps its retry for every tool.
-        read_only = _tool_is_read_only(server_name, tool_name)
+        read_only = meta is None and _tool_is_read_only(server_name, tool_name)
 
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op, retry_safe=read_only):
                 server._pending_call_context = contextvars.copy_context()  # for the elicitation callback
                 try:
-                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
+                    try:
+                        if meta is None:
+                            result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
+                        else:
+                            result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args, meta)
+                    except Exception:
+                        if meta is not None:
+                            raise _AttestedCallOutcomeUnknown(
+                                "Attested MCP call outcome is uncertain; verify with a read-only tool"
+                            ) from None
+                        raise
                 finally:
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
-            return _render_call_tool_result(result, server_name)
+            rendered = _render_call_tool_result(
+                result, server_name, native_images=config.get("native_images") is True
+            )
+            return redact_host_material(rendered, meta, config)
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)
-            logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
+            if meta is not None:
+                logger.error("MCP tool %s/%s attested call failed (%s)",
+                             server_name, tool_name, type(exc).__name__)
+            else:
+                logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
         session_expired = partial(_handle_session_expired_and_retry, call_may_have_side_effects=not read_only)
-        return _dispatch(
+        result = _dispatch(
             server_name, server, op, _call, tool_timeout,
             (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, session_expired),
             _on_failure, record_outcome=True)
+        return redact_host_material(result, meta, config)
     return _handler
 
 

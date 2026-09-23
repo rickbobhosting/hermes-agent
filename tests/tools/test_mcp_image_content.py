@@ -119,3 +119,31 @@ class TestCacheMcpImageBlock:
         tag = _cache_mcp_image_block(block)
         assert tag.startswith("MEDIA:")
         assert tag.endswith(".jpg"), f"expected .jpg extension, got {tag!r}"
+
+
+def test_mcp_result_requires_native_images_opt_in_and_never_caches_when_off(monkeypatch):
+    from tools import mcp_tool_handlers as handlers
+
+    def forbidden_cache(_block):
+        raise AssertionError("image bytes reached the cache while native_images is disabled")
+
+    monkeypatch.setattr(handlers, "_cache_mcp_image_block", forbidden_cache)
+    blob = base64.b64encode(_png_bytes()).decode("ascii")
+    image = SimpleNamespace(type="image", data=blob, mimeType="image/png")
+    result = SimpleNamespace(content=[image], structuredContent={"image": blob}, isError=False)
+    rendered = handlers._render_call_tool_result(result, "project_test")
+    assert "MCP image omitted" in rendered
+    assert blob not in rendered
+    assert "structuredContent" not in rendered
+
+
+def test_mcp_result_caches_native_image_only_when_explicitly_enabled(monkeypatch):
+    from tools import mcp_tool_handlers as handlers
+
+    seen = []
+    monkeypatch.setattr(handlers, "_cache_mcp_image_block", lambda block: seen.append(block) or "MEDIA:/cached.png")
+    image = SimpleNamespace(type="image", data="image-data", mimeType="image/png")
+    result = SimpleNamespace(content=[image], structuredContent=None, isError=False)
+    rendered = handlers._render_call_tool_result(result, "project_test", native_images=True)
+    assert seen == [image]
+    assert "MEDIA:/cached.png" in rendered

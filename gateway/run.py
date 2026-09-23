@@ -4152,7 +4152,7 @@ class GatewayRunner(
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(self, context: SessionContext, event=None) -> list:
         """Set session context variables (contextvars, not os.environ, so concurrent messages can't
         overwrite each other). Returns reset tokens for ``_clear_session_env`` in a ``finally``."""
         from gateway.session_context import set_session_vars
@@ -4160,6 +4160,17 @@ class GatewayRunner(
         # True keeps CLI/unknown paths working; stateless adapters (api_server) declare False.
         _adapter = (getattr(self, "adapters", None) or {}).get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+        _content = getattr(event, "raw_message", None)
+        _event_id = getattr(event, "message_id", None)
+        _authorized_project_chat = (
+            context.source.platform == Platform.MATRIX
+            and isinstance(_content, dict)
+            and _content.get("org.project.authorize_miniproject") is True
+            and isinstance(_event_id, str)
+            and _event_id.startswith("$")
+            and str(context.source.chat_id).startswith("!")
+            and str(context.source.user_id).startswith("@")
+        )
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -4172,10 +4183,11 @@ class GatewayRunner(
             scope_id=str(getattr(context.source, "scope_id", "") or ""),
             parent_chat_id=str(getattr(context.source, "parent_chat_id", "") or ""),
             session_key=context.session_key,
-            message_id=str(context.source.message_id) if context.source.message_id else "",
+            message_id=str(_event_id if _authorized_project_chat else context.source.message_id or ""),
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
-            cron_session="")
+            cron_session="",
+            project_chat_authorized=_authorized_project_chat)
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""

@@ -52,7 +52,8 @@ def _strip_reserved_meta_keys(meta) -> Optional[Dict[str, Any]]:
     input wasn't a mapping."""
     if not isinstance(meta, dict):
         return None
-    out = {k: v for k, v in meta.items() if isinstance(k, str) and (not _is_reserved_mcp_meta_key(k))}
+    out = {k: v for k, v in meta.items() if isinstance(k, str)
+           and k != "org.project.chat_turn" and (not _is_reserved_mcp_meta_key(k))}
     return out or None
 
 

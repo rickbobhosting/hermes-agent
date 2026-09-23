@@ -1971,7 +1971,7 @@ class GatewayTurnMixin:
         _was_auto_reset, _is_new_session = await self._hmwa_open_session(session_entry, session_key, source)
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        _session_env_tokens = self._set_session_env(context, event)
         # Self-injected turns (MessageEvent(internal=True)) persist with a DB-only display_kind so
         # UIs render timeline notices, not user bubbles; role/content untouched.
         persist_user_display_kind = display_kind_for_event(event)
@@ -2169,6 +2169,14 @@ class GatewayTurnMixin:
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:
+            from gateway.session_context import project_chat_authorized
+            if project_chat_authorized():
+                try:
+                    from tools.mcp_project_attestation import finish_attested_turns
+                    await asyncio.wait_for(asyncio.to_thread(finish_attested_turns), timeout=12)
+                except Exception as exc:
+                    # The Project authorization expires on its own; never log proof or bearer data.
+                    logger.warning("Project chat turn closure failed (%s)", type(exc).__name__)
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 
