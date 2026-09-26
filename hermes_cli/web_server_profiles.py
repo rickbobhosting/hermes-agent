@@ -145,6 +145,10 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
 
 def _resolve_profile_dir(name: str) -> Path:
     """Validate ``name`` and resolve to its directory or raise an HTTPException."""
+    from hermes_cli.dashboard_fleet import is_fleet_selector
+    from hermes_cli.dashboard_fleet_access import require_fleet_access
+    if is_fleet_selector(name):
+        return require_fleet_access(name, "inspect").home
     from hermes_cli import profiles as profiles_mod
     try:
         profiles_mod.validate_profile_name(name)

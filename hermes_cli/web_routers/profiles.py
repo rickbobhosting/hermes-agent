@@ -38,7 +38,8 @@ from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK
 from hermes_cli.web_server_profiles import (
     _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
 )
-from hermes_cli.dashboard_fleet import fleet_profile_dicts, resolve_fleet_target
+from hermes_cli.dashboard_fleet import fleet_profile_dicts
+from hermes_cli.dashboard_fleet_access import require_fleet_access
 from hermes_cli.web_server_sessions import _open_session_db_at_path
 from starlette.concurrency import run_in_threadpool
 from hermes_cli.web_models import (
@@ -669,29 +670,78 @@ def _read_profiles():
 def list_fleet_sessions(target_id: str, limit: int = Query(20, ge=0, le=100),
                         offset: int = Query(0, ge=0)):
     """Read one registered fleet store without schema repair or auto-archive writes."""
-    from hermes_state import SessionDB
-
     selector = f"fleet:{target_id}"
-    target = resolve_fleet_target(selector)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Fleet target not found")
-    db_path = target.home / "state.db"
-    if not db_path.is_file():
-        raise HTTPException(status_code=404, detail="Fleet target has no session database")
+    db = _fleet_session_db(target_id)
     try:
-        db = SessionDB(db_path=db_path, read_only=True)
-        try:
-            rows = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True)
-            total = db.session_count(exclude_children=True)
-        finally:
-            db.close()
+        rows = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True)
+        total = db.session_count(exclude_children=True)
     except Exception as exc:
         _log.warning("Fleet session read failed for %s: %s", selector, exc)
         raise HTTPException(status_code=503, detail="Fleet session store unavailable") from exc
+    finally:
+        db.close()
     for row in rows:
         row["profile"] = selector
         row["is_default_profile"] = False
     return {"sessions": rows, "total": total, "limit": limit, "offset": offset}
+
+
+def _fleet_session_db(target_id: str):
+    """Open only the registered target's existing store, without schema writes."""
+    from hermes_state import SessionDB
+
+    target = require_fleet_access(f"fleet:{target_id}", "inspect")
+    db_path = target.home / "state.db"
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="Fleet target has no session database")
+    try:
+        return SessionDB(db_path=db_path, read_only=True)
+    except Exception as exc:
+        _log.warning("Fleet session read failed for %s: %s", target.selector, exc)
+        raise HTTPException(status_code=503, detail="Fleet session store unavailable") from exc
+
+
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}")
+def get_fleet_session_detail(target_id: str, session_id: str):
+    from hermes_cli.web_routers.sessions import _resolve_session_id
+
+    db = _fleet_session_db(target_id)
+    try:
+        sid = _resolve_session_id(db, session_id)
+        session = db.get_session(sid) if sid else None
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session["profile"] = f"fleet:{target_id}"
+        session["is_default_profile"] = False
+        return session
+    finally:
+        db.close()
+
+
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}/messages")
+def get_fleet_session_messages(
+    target_id: str, session_id: str, limit: int = Query(500, ge=0, le=500),
+    offset: int = Query(0, ge=0), order: str = Query("latest"),
+    include_compacted: bool = False,
+):
+    from hermes_cli.web_routers.sessions import _project_for_display, _resolve_session_id
+
+    if order not in {"oldest", "latest"}:
+        raise HTTPException(status_code=400, detail="order must be one of: oldest, latest")
+    db = _fleet_session_db(target_id)
+    try:
+        sid = _resolve_session_id(db, session_id)
+        if not sid or db.get_session(sid) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        messages = db.get_messages(sid, limit=limit, offset=offset,
+                                   latest=order == "latest", include_compacted=include_compacted)
+        messages = _project_for_display(messages)
+        return {"session_id": sid, "profile": f"fleet:{target_id}", "messages": messages,
+                "pagination": {"limit": limit, "offset": offset, "order": order,
+                               "returned": len(messages)}}
+    finally:
+        db.close()
 
 
 @router.get("/api/profiles")

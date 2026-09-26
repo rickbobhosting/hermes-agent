@@ -5,9 +5,9 @@ or managing selected profile homes through ``dashboard.fleet_targets`` in the
 dashboard home's config.yaml, but targets are never discovered by scanning
 directories and browser input is never interpreted as a filesystem path.
 
-This candidate exposes targets for inspection only. A configured ``manage`` or
-``execute`` value is parsed but not granted by the dashboard until the write
-and execution routes have independent coverage.
+Capabilities are enforced by ``dashboard_fleet_access``. A configured execute
+value does not enable an operation unless that route explicitly supports a
+scoped external home.
 """
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def resolve_fleet_target(selector: str) -> DashboardFleetTarget | None:
 
 
 def fleet_profile_dicts() -> list[dict[str, Any]]:
-    """Describe registered homes without granting a generic profile write path."""
+    """Describe registered homes and their configured capabilities."""
     from hermes_cli import profiles as profiles_mod
 
     records: list[dict[str, Any]] = []
@@ -185,6 +185,6 @@ def fleet_profile_dicts() -> list[dict[str, Any]]:
             "distribution_name": None, "distribution_version": None,
             "distribution_source": None, "has_alias": False,
             "zone": target.zone, "external": True,
-            "access": "inspect", "read_only": True,
+            "access": target.access, "read_only": target.access == "inspect",
         })
     return records

@@ -409,6 +409,9 @@ async def console_ws(ws: WebSocket) -> None:
     out = _ConsoleSender(ws)
 
     try:
+        from hermes_cli.dashboard_fleet import is_fleet_selector
+        if is_fleet_selector(profile):
+            raise HTTPException(403, "The dashboard host console is unavailable for external fleet targets.")
         from hermes_cli.console_engine import HermesConsoleEngine
 
         engine = HermesConsoleEngine(output_limit=_CONSOLE_OUTPUT_LIMIT)

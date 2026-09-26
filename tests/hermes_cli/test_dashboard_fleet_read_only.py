@@ -1,11 +1,11 @@
-"""Explicit external dashboard homes remain visible and strictly read-only."""
+"""Explicit external dashboard homes require scoped capabilities."""
 from __future__ import annotations
 
 import yaml
 from fastapi.testclient import TestClient
 
 
-def test_fleet_discovery_and_session_read_never_grant_writes(tmp_path, monkeypatch):
+def test_fleet_discovery_and_session_read_respect_configured_access(tmp_path, monkeypatch):
     from hermes_state import SessionDB
     from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
     from hermes_cli.web_server_profiles import _resolve_profile_dir
@@ -40,8 +40,8 @@ def test_fleet_discovery_and_session_read_never_grant_writes(tmp_path, monkeypat
         assert target["display_name"] == "Infra"
         assert target["zone"] == "infrastructure"
         assert target["external"] is True
-        assert target["access"] == "inspect"  # configured execute is not granted yet
-        assert target["read_only"] is True
+        assert target["access"] == "execute"
+        assert target["read_only"] is False
         assert "fleet:relative" not in profiles
         assert "fleet:missing" not in profiles
         assert all(str(sibling) != p["path"] for p in profiles.values())
@@ -54,15 +54,5 @@ def test_fleet_discovery_and_session_read_never_grant_writes(tmp_path, monkeypat
         assert client.get("/api/profiles/fleet/unregistered/sessions", headers=headers).status_code == 404
         assert client.get("/api/profiles/fleet/infra/sessions?limit=101", headers=headers).status_code == 422
 
-        # The shared profile resolver remains local-only, including for routes
-        # that could mutate SOUL, model, config, or gateway state.
-        from fastapi import HTTPException
-        try:
-            _resolve_profile_dir("fleet:infra")
-        except HTTPException as exc:
-            assert exc.status_code == 400
-        else:
-            raise AssertionError("Fleet selector entered generic write resolver")
-        assert client.put("/api/profiles/fleet:infra/description", json={"description": "changed"},
-                          headers=headers).status_code == 400
-    assert "changed" not in (external / "config.yaml").read_text(encoding="utf-8")
+        assert _resolve_profile_dir("fleet:infra") == external
+        assert client.post("/api/gateway/restart?profile=fleet:infra", headers=headers).status_code == 403

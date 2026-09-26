@@ -57,6 +57,8 @@ except ImportError:
 WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
 _log = logging.getLogger(__name__)
 
+from hermes_cli.dashboard_fleet_access import dashboard_fleet_access_middleware  # noqa: E402
+
 
 from hermes_cli.web_server_lifecycle import (  # noqa: E402
     PORT_IN_USE_EXIT_CODE,
@@ -399,6 +401,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registered before the auth gates, so Starlette runs those gates first.
+app.middleware("http")(dashboard_fleet_access_middleware)
 
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
