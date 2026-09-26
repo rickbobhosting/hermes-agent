@@ -44,7 +44,8 @@ class FakeClient:
 def _dispatcher(tmp_path, *, default=None):
     defaults = {("matrix", ACCOUNT, "!room:example.org"): default} if default else {}
     rules = Rules({"matrix": ACCOUNT}, defaults,
-                  {"geo": ("geo",), "research": ("research",), "infra": ("infra",)})
+                  {"geo": ("geo",), "research": ("research",), "infra": ("infra",)},
+                  {name: frozenset({"@ricky:example.org"}) for name in ("geo", "research", "infra")})
     client = FakeClient()
     return MatrixPersonalRouter(Router(rules, BindingStore(tmp_path / "bindings.db")), client, ACCOUNT), client
 
@@ -107,6 +108,27 @@ async def test_api_failure_preserves_binding_and_does_not_fall_back_to_orchestra
     assert dispatch.router.bindings.get(Conversation(
         "matrix", ACCOUNT, "!room:example.org", "thread-a", "@ricky:example.org")) is None
     assert not fallback_calls
+
+
+@pytest.mark.asyncio
+async def test_specialist_sender_policy_denies_explicit_default_and_saved_routes(tmp_path):
+    dispatch, client = _dispatcher(tmp_path, default="geo")
+    async def fallback(_event):
+        return "Orchestra"
+
+    denied = "@other:example.org"
+    assert "not allowed" in await dispatch.handle(_event(sender=denied), fallback)
+    assert "not allowed" in await dispatch.handle(_event("map", sender=denied), fallback)
+    ctx = Conversation("matrix", ACCOUNT, "!room:example.org", "thread-a", denied)
+    dispatch.router.bindings.commit(ctx, "geo", "old-session")
+    assert "not allowed" in await dispatch.handle(_event("continue", sender=denied), fallback)
+    assert dispatch.router.bindings.get(ctx) == ("geo", "old-session")
+    assert not client.calls
+
+    # An omitted policy denies even an otherwise valid Orchestra sender.
+    dispatch.router.rules.matrix_allowed_senders.pop("geo")
+    assert "not allowed" in await dispatch.handle(_event(), fallback)
+    assert not client.calls
 
 
 @pytest.mark.asyncio
@@ -277,7 +299,8 @@ async def test_token_only_matrix_identity_routes_only_after_matching_whoami(tmp_
     rules_path = tmp_path / "rules.yaml"
     rules_path.write_text(
         "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
-        "room_defaults: []\nkeywords: {}\n")
+        "room_defaults: []\nkeywords: {}\n"
+        "matrix_allowed_senders: {geo: ['@ricky:example.org']}\n")
     adapter = SimpleNamespace(_user_id="", config=PlatformConfig(extra={
         "personal_routing": {"version": 1, "enabled": True, "rules_path": str(rules_path)}}))
     dispatch = build_opt_in_router(adapter)

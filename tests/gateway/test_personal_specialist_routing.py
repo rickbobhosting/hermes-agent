@@ -83,6 +83,21 @@ room_defaults:
     assert Router(candidate_rules, BindingStore(tmp_path / "state.sqlite3")).resolve(_ctx(), "@geo hi").kind == "ignore"
 
 
+def test_matrix_sender_rules_require_exact_unique_personal_users(tmp_path):
+    path = tmp_path / "rules.yaml"
+    prefix = "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
+    for raw in (
+        "{geo: []}", "{geo: ['ricky:example.org']}",
+        "{geo: ['@ricky:example.org', '@ricky:example.org']}",
+        "{project-bd-pursuits: ['@ricky:example.org']}",
+    ):
+        path.write_text(prefix + f"matrix_allowed_senders: {raw}\n")
+        with pytest.raises(ValueError, match="matrix allowed senders"):
+            Rules.load(path)
+    path.write_text(prefix + "matrix_allowed_senders: {geo: ['@ricky:example.org']}\n")
+    assert Rules.load(path).matrix_allowed_senders["geo"] == frozenset({"@ricky:example.org"})
+
+
 def test_reopen_store_preserves_exact_session_after_acceptance(tmp_path):
     path = tmp_path / "a" / "bindings.db"
     other_path = tmp_path / "b" / "bindings.db"

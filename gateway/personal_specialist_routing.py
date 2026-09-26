@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -18,6 +18,7 @@ import yaml
 
 
 _SELECTOR = re.compile(r"^\s*@([a-z][a-z0-9_-]*)(?=\s|$)", re.IGNORECASE)
+_MATRIX_USER = re.compile(r"@[^:\s]+:[^\s]+\Z")
 _PERSONAL = frozenset({
     "champ", "geo", "research", "markettools", "pursuit", "finance", "health", "infra",
 })
@@ -55,6 +56,7 @@ class Rules:
     owner_accounts: Mapping[str, str]
     room_defaults: Mapping[tuple[str, str, str], str]
     keywords: Mapping[str, tuple[str, ...]]
+    matrix_allowed_senders: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "Rules":
@@ -64,7 +66,9 @@ class Rules:
         raw_accounts = data.get("owner_accounts", {})
         raw_defaults = data.get("room_defaults", [])
         raw_keywords = data.get("keywords", {})
-        if not isinstance(raw_accounts, dict) or not isinstance(raw_defaults, list) or not isinstance(raw_keywords, dict):
+        raw_senders = data.get("matrix_allowed_senders", {})
+        if (not isinstance(raw_accounts, dict) or not isinstance(raw_defaults, list)
+                or not isinstance(raw_keywords, dict) or not isinstance(raw_senders, dict)):
             raise ValueError("invalid personal routing rules")
         accounts: dict[str, str] = {}
         for frontend, account in raw_accounts.items():
@@ -92,7 +96,15 @@ class Rules:
             if not all(isinstance(p, str) and p.strip() and len(p) < 100 for p in phrases):
                 raise ValueError("keyword phrases must be non-empty strings under 100 characters")
             keywords[profile] = tuple(p.casefold().strip() for p in phrases)
-        return cls(accounts, defaults, keywords)
+        senders: dict[str, frozenset[str]] = {}
+        for profile, users in raw_senders.items():
+            if (profile not in _PERSONAL or not isinstance(users, list) or not users
+                    or not all(isinstance(user, str) and _MATRIX_USER.fullmatch(user)
+                               for user in users)
+                    or len(users) != len(set(users))):
+                raise ValueError("matrix allowed senders require an exact personal profile and unique user IDs")
+            senders[profile] = frozenset(users)
+        return cls(accounts, defaults, keywords, senders)
 
 
 class BindingStore:

@@ -33,6 +33,22 @@ and prompt stay on `127.0.0.1`.
 The adapter still owns Matrix authorization, mention/room policy, event dedup,
 threading, and reply delivery. Routing is installed only on a standalone
 primary Matrix adapter, leaving secondary, work, and Qwen handlers unchanged.
+Each selected specialist also needs an explicit sender list in the versioned
+rules file, for example:
+
+```yaml
+matrix_allowed_senders:
+  geo: ['@approved-user:example.org']
+```
+
+This check applies after Orchestra's ingress authorization to exact selectors,
+room defaults, and saved bindings. A missing specialist entry denies its
+invocation. The candidate does not import a different bot's allowlist at
+runtime; review the selected specialist profile `.env` and approved access
+policy before populating each entry. The September 26 read-only audit found
+Orchestra's selected allowlist has ten senders, while each specialist has one
+or two. Several specialist senders are outside Orchestra's current allowlist,
+so both policies must be reconciled before those users can reach the umbrella.
 When enabled, Matrix text batching is disabled on that adapter so each event
 has its own idempotency key. The key binds account, room, thread, sender, and
 Matrix event ID. A repeated event first retrieves its durable invocation by

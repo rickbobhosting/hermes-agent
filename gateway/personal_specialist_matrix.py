@@ -156,6 +156,11 @@ class MatrixPersonalRouter:
                 "The saved specialist is unavailable; choose an exact @profile selector.")
         if decision.kind != "invoke" or not decision.profile or not decision.prompt:
             raise InvocationUnavailable("invalid specialist route")
+        # The Matrix adapter has authorized this sender for Orchestra, but a
+        # specialist may have a narrower existing allowlist. An absent policy
+        # fails closed for that specialist, including saved bindings/defaults.
+        if source.user_id not in self.router.rules.matrix_allowed_senders.get(decision.profile, frozenset()):
+            return "This account is not allowed to use the selected specialist."
         try:
             key = event_key(ctx, event.message_id or "")
             record = await self.client.run(

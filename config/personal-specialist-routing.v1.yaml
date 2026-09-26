@@ -3,6 +3,9 @@
 version: 1
 owner_accounts: {}
 room_defaults: []
+# Populate each selected specialist's approved Matrix senders before enabling
+# its route. Missing entries deny that specialist after Orchestra ingress auth.
+matrix_allowed_senders: {}
 keywords:
   champ: [champ]
   geo: [geo, geography]
