@@ -87,7 +87,11 @@ const sidebarEvents = vi.hoisted(() => ({
   onPersistentSessionChange: null as null | ((sessionKey: string) => void),
 }));
 const apiMocks = vi.hoisted(() => ({
-  buildWsUrl: vi.fn(async (_path: string, _params?: Record<string, string>) => "ws://localhost/api/pty?channel=chat-1"),
+  buildWsUrl: vi.fn(async (_path: string, _params?: Record<string, string>) => {
+    void _path;
+    void _params;
+    return "ws://localhost/api/pty?channel=chat-1";
+  }),
   getSessionLatestDescendant: vi.fn(async (id: string) => ({ session_id: id, path: [id] })),
   getSessionDetail: vi.fn(async () => ({ title: "Saved chat" })),
   getSessions: vi.fn(async () => ({ sessions: [] as import("@/lib/api").SessionInfo[] })),

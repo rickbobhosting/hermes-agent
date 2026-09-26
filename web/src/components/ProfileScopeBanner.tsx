@@ -14,7 +14,7 @@ export function ProfileScopeBanner() {
   if (!profile || profile === currentProfile) return null;
 
   const message = profile.startsWith("fleet:")
-    ? `Inspecting “${selectedTarget.display_name || profile}” — changes and interactive execution are unavailable.`
+    ? `Inspecting “${selectedTarget?.display_name || profile}” — changes and interactive execution are unavailable.`
     : (
         t.app.managingProfileBanner ??
         "Managing profile “{name}” — config, keys, skills, MCPs, model, and new chats apply to that profile."

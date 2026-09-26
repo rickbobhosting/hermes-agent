@@ -73,6 +73,7 @@ import { ProfileProvider } from "@/contexts/ProfileProvider";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
+import { FleetScopedPluginSlot } from "@/components/FleetScopedPluginSlot";
 import { fleetRouteAllowed, fleetSelectionBlocked } from "@/lib/fleet-route";
 import { MemoryPressureBanner } from "@/components/MemoryPressureBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -104,7 +105,7 @@ import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
 import type { Translations } from "@/i18n/types";
-import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
+import { PluginPage, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
@@ -528,7 +529,7 @@ export default function App() {
         aria-hidden
         className="pointer-events-none fixed inset-0 z-0"
       >
-        <PluginSlot name="backdrop" />
+        <FleetScopedPluginSlot name="backdrop" />
       </div>
 
       <header
@@ -579,7 +580,7 @@ export default function App() {
           its own mt-14 AND the content kept pt-14, so two visible banners
           stacked three offsets (NS-656 review P3). One spacer, applied once. */}
       <div aria-hidden className="h-14 shrink-0 lg:hidden" />
-      <PluginSlot name="header-banner" />
+      <FleetScopedPluginSlot name="header-banner" />
       <ProfileScopeBanner />
       <MemoryPressureBanner status={sidebarStatus} />
 
@@ -618,7 +619,7 @@ export default function App() {
                   collapsed && "lg:hidden",
                 )}
               >
-                <PluginSlot name="header-left" />
+                <FleetScopedPluginSlot name="header-left" />
 
                 <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
                   Hermes
@@ -731,7 +732,7 @@ export default function App() {
                   isDesktopCollapsed && "lg:flex-col lg:items-start",
                 )}
               >
-                <PluginSlot name="header-right" />
+                <FleetScopedPluginSlot name="header-right" />
 
                 <SidebarIconWithTooltip
                   collapsed={isDesktopCollapsed}
@@ -773,7 +774,7 @@ export default function App() {
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
-              <PluginSlot name="pre-main" />
+              <FleetScopedPluginSlot name="pre-main" />
               <div
                 className={cn(
                   "w-full min-w-0",
@@ -828,13 +829,13 @@ export default function App() {
                     <RouteFallback label="Loading chat…" />
                   ) : null)}</FleetLocalOnly>
               </div>
-              <PluginSlot name="post-main" />
+              <FleetScopedPluginSlot name="post-main" />
             </div>
           </PageHeaderProvider>
         </div>
       </div>
 
-      <PluginSlot name="overlay" />
+      <FleetScopedPluginSlot name="overlay" />
     </div>
     </ProfileProvider>
   );
