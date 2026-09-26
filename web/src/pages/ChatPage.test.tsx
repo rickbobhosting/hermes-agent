@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useNavigate } from "react-router";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -90,6 +90,7 @@ const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async (_path: string, _params?: Record<string, string>) => "ws://localhost/api/pty?channel=chat-1"),
   getSessionLatestDescendant: vi.fn(async (id: string) => ({ session_id: id, path: [id] })),
   getSessionDetail: vi.fn(async () => ({ title: "Saved chat" })),
+  getSessions: vi.fn(async () => ({ sessions: [] as import("@/lib/api").SessionInfo[] })),
 }));
 const uploadChatImage = vi.hoisted(() =>
   vi.fn(async () => ({ path: "/tmp/pasted.png" })),
@@ -113,9 +114,6 @@ vi.mock("@/components/ChatSidebar", () => ({
     return null;
   },
 }));
-vi.mock("@/components/ChatSessionList", () => ({
-  ChatSessionList: () => null,
-}));
 vi.mock("@/components/Backdrop", () => ({ Backdrop: () => null }));
 vi.mock("@/plugins", () => ({
   PluginSlot: () => null,
@@ -132,6 +130,8 @@ vi.mock("@/themes", () => ({
 vi.mock("@/i18n", () => ({
   useI18n: () => ({
     t: {
+      common: { loading: "Loading", refresh: "Refresh", retry: "Retry" },
+      sessions: { noSessions: "No sessions", title: "Sessions", untitledSession: "Untitled", newChat: "New chat" },
       app: {
         closeModelTools: "Close model tools",
         modelToolsSheetSubtitle: "Tools",
@@ -221,6 +221,8 @@ beforeEach(() => {
   apiMocks.getSessionLatestDescendant.mockImplementation(async (id: string) => ({ session_id: id, path: [id] }));
   apiMocks.getSessionDetail.mockReset();
   apiMocks.getSessionDetail.mockResolvedValue({ title: "Saved chat" });
+  apiMocks.getSessions.mockReset();
+  apiMocks.getSessions.mockResolvedValue({ sessions: [] });
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal(
     "ResizeObserver",
@@ -282,6 +284,58 @@ afterEach(async () => {
 });
 
 describe("ChatPage", () => {
+  it("keeps the live PTY identity when a rendered saved-session row is picked", async () => {
+    apiMocks.getSessions.mockResolvedValue({ sessions: [{
+      id: "saved-1", title: "Saved chat row", preview: null,
+      last_active: Date.now() / 1000, started_at: Date.now() / 1000,
+      ended_at: null, is_active: true, source: "dashboard", model: null,
+      message_count: 1, tool_call_count: 0, input_tokens: 0, output_tokens: 0,
+    }] });
+    const { default: ChatPage } = await import("./ChatPage");
+    function BackToChat() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate("/chat")}>Back to chat</button>;
+    }
+    function LocationProbe() {
+      const location = useLocation();
+      return <output data-testid="chat-location">{location.search}</output>;
+    }
+    await render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <BackToChat />
+        <LocationProbe />
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    await vi.waitFor(() => expect(container.textContent).toContain("Saved chat row"));
+    const token = apiMocks.buildWsUrl.mock.calls[0]?.[1]?.attach;
+    expect(token).toMatch(/^[0-9a-f]{32}$/);
+
+    await act(async () => {
+      sidebarEvents.onPersistentSessionChange?.("saved-1");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      (Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Back to chat"))?.click();
+    });
+    expect(container.querySelector("[data-testid='chat-location']")?.textContent).toBe("");
+    const savedRow = Array.from(container.querySelectorAll("span"))
+      .find((span) => span.textContent === "Saved chat row");
+    expect(savedRow).toBeTruthy();
+    const rowTarget = savedRow?.closest("button, [role='button']") as HTMLElement | null;
+    expect(rowTarget).toBeTruthy();
+    await act(async () => {
+      rowTarget?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector("[data-testid='chat-location']")?.textContent)
+      .toBe("?resume=saved-1");
+    const tokens = apiMocks.buildWsUrl.mock.calls.map((call) => call[1]?.attach);
+    expect(tokens.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(tokens)).toEqual(new Set([token]));
+  });
+
   it("reattaches the live PTY when its saved session is selected", async () => {
     const { default: ChatPage } = await import("./ChatPage");
     function Selector() {
