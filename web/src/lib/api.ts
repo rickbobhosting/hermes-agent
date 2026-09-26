@@ -529,6 +529,15 @@ export const api = {
     if (params.component && params.component !== "all") qs.set("component", params.component);
     return fetchJSON<LogsResponse>(`/api/logs?${qs.toString()}`);
   },
+  getKanbanTasks: (params: { profile?: string; status?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.profile) qs.set("profile", params.profile);
+    if (params.status) qs.set("status", params.status);
+    if (params.limit) qs.set("limit", String(params.limit));
+    return fetchJSON<KanbanTaskListResponse>(`/api/kanban/tasks?${qs.toString()}`);
+  },
+  getKanbanTask: (taskId: string) =>
+    fetchJSON<KanbanTaskDetailResponse>(`/api/kanban/tasks/${encodeURIComponent(taskId)}`),
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),
@@ -2111,6 +2120,51 @@ export interface SessionMessagesResponse {
 export interface LogsResponse {
   file: string;
   lines: string[];
+}
+
+export interface KanbanTask {
+  id: string;
+  title: string;
+  body: string | null;
+  assignee: string | null;
+  status: string;
+  priority: number;
+  created_by: string | null;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  workspace_kind: string | null;
+  workspace_path: string | null;
+  branch_name: string | null;
+  tenant: string | null;
+  result: string | null;
+  consecutive_failures: number | null;
+  worker_pid: number | null;
+  last_failure_error: string | null;
+  last_heartbeat_at: number | null;
+}
+
+export interface KanbanTaskListResponse {
+  tasks: KanbanTask[];
+}
+
+export interface KanbanTaskComment {
+  author: string;
+  body: string;
+  created_at: number;
+}
+
+export interface KanbanTaskEvent {
+  kind: string;
+  payload: unknown;
+  created_at: number;
+  run_id: number | null;
+}
+
+export interface KanbanTaskDetailResponse {
+  task: KanbanTask;
+  comments: KanbanTaskComment[];
+  events: KanbanTaskEvent[];
 }
 
 export interface ManagedFileEntry {

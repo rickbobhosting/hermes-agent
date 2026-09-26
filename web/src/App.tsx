@@ -34,6 +34,7 @@ import {
   FileText,
   Globe,
   Heart,
+  Kanban,
   KeyRound,
   Menu,
   MessageSquare,
@@ -83,6 +84,7 @@ const EnvPage = lazy(() => import("@/pages/EnvPage"));
 const FilesPage = lazy(() => import("@/pages/FilesPage"));
 const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
 const LogsPage = lazy(() => import("@/pages/LogsPage"));
+const KanbanPage = lazy(() => import("@/pages/KanbanPage"));
 const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
 const ModelsPage = lazy(() => import("@/pages/ModelsPage"));
 const CronPage = lazy(() => import("@/pages/CronPage"));
@@ -161,6 +163,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/analytics": AnalyticsPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
+  "/kanban": KanbanPage,
   "/cron": CronPage,
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
@@ -205,6 +208,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: Cpu,
   },
   { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
+  { path: "/kanban", label: "Kanban", icon: Kanban },
   { path: "/cron", labelKey: "cron", label: "Cron", icon: Clock },
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/plugins", labelKey: "plugins", label: "Plugins", icon: Puzzle },

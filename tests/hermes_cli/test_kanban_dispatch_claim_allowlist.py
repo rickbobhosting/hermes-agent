@@ -76,3 +76,34 @@ def test_unset_allowlist_keeps_default_claimable(kanban_home, all_assignees_spaw
         res = kbd.dispatch_once(conn, dry_run=True)
     assert [t for t, _a, _w in res.spawned] == [tid]
     assert res.skipped_nonspawnable == []
+
+
+def test_qwen_task_is_claimed_only_by_qwen_dispatcher(kanban_home, all_assignees_spawnable):
+    """The incident card must remain ready through unrelated dispatcher ticks."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Qwen-only card", assignee="qwen_local")
+        for scope in ("geo", "default", "project-admin"):
+            result = kbd.dispatch_once(
+                conn, dispatch_profiles=frozenset({scope}),
+                spawn_fn=lambda *_args, **_kwargs: 4242,
+                dry_run=False,
+            )
+            assert result.spawned == []
+            assert kb.get_task(conn, tid).status == "ready"
+        result = kbd.dispatch_once(
+            conn, dispatch_profiles=frozenset({"qwen_local"}),
+            spawn_fn=lambda *_args, **_kwargs: 4242,
+            dry_run=False,
+        )
+        assert [task_id for task_id, _assignee, _workspace in result.spawned] == [tid]
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_claim_cas_rejects_reassignment_between_selection_and_claim(
+    kanban_home, all_assignees_spawnable,
+):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Race", assignee="geo")
+        assert kb.claim_task(conn, tid, expected_assignee="qwen_local") is None
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.claim_task(conn, tid, expected_assignee="geo") is not None

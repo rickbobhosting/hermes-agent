@@ -2162,7 +2162,7 @@ def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
 
 def _claim_and_open_run(
     conn: sqlite3.Connection, task_id: str, source_status: str, lock: str, expires: int, now: int,
-    *, event_extra: Optional[dict] = None,
+    *, event_extra: Optional[dict] = None, expected_assignee: Optional[str] = None,
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
@@ -2176,8 +2176,9 @@ def _claim_and_open_run(
          WHERE id = ?
            AND status = '{source_status}'
            AND claim_lock IS NULL
+           AND (? IS NULL OR assignee = ?)
         """,
-        (lock, expires, now, task_id),
+        (lock, expires, now, task_id, expected_assignee, expected_assignee),
     )
     if cur.rowcount != 1:
         return None
@@ -2209,7 +2210,7 @@ def _claim_and_open_run(
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, expected_assignee: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -2220,6 +2221,10 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if expected_assignee is not None:
+            owner = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if owner is None or owner["assignee"] != expected_assignee:
+                return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2234,7 +2239,10 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+        run_id = _claim_and_open_run(
+            conn, task_id, "ready", lock, expires, now,
+            expected_assignee=expected_assignee,
+        )
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2244,7 +2252,7 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, expected_assignee: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
@@ -2253,6 +2261,10 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if expected_assignee is not None:
+            owner = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if owner is None or owner["assignee"] != expected_assignee:
+                return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2265,7 +2277,8 @@ def claim_review_task(
                 )
             return None
         run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            conn, task_id, "review", lock, expires, now,
+            event_extra={"source_status": "review"}, expected_assignee=expected_assignee,
         )
         if run_id is None:
             return None

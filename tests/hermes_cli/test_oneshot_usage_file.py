@@ -4,7 +4,21 @@ import json
 
 import pytest
 
-from hermes_cli.oneshot import _write_usage_file
+from hermes_cli.oneshot import _first_visible_token_recorder, _write_usage_file
+
+
+def test_first_visible_token_timestamp_is_written_once(tmp_path):
+    path = tmp_path / "progress.jsonl"
+    callback = _first_visible_token_recorder(str(path))
+    callback(None)
+    callback("  ")
+    assert not path.exists()
+    callback("first visible delta")
+    callback("second delta")
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(events) == 1
+    assert events[0]["event"] == "first_token"
+    assert events[0]["at"].endswith("+00:00")
 
 
 def _result(**overrides):

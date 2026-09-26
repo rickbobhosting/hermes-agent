@@ -1,0 +1,14 @@
+# Candidate rules only. Populate owner_accounts with the exact receiving bot identity
+# after Matrix membership, encryption and single-reply ownership have been verified.
+version: 1
+owner_accounts: {}
+room_defaults: []
+keywords:
+  champ: [champ]
+  geo: [geo, geography]
+  research: [research]
+  markettools: [market tools, markettools]
+  pursuit: [pursuit master, personal pursuit]
+  finance: [finance]
+  health: [health]
+  infra: [infrastructure, infra]

@@ -1753,6 +1753,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    dispatch_profiles: Optional[frozenset[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -1776,6 +1777,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            dispatch_profiles=dispatch_profiles,
         )
 
     try:
@@ -1825,12 +1827,16 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    dispatch_profiles: Optional[frozenset[str]] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
     skip is recorded on ``result``.
     """
     task_id = row["id"]
+    if dispatch_profiles is not None and assignee not in dispatch_profiles:
+        result.skipped_nonspawnable.append(task_id)
+        return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
@@ -1872,7 +1878,8 @@ def _dispatch_lane_task(
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds,
+                    expected_assignee=assignee)
     if claimed is None:
         return False
     try:
@@ -2086,6 +2093,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    dispatch_profiles: Optional[frozenset[str]] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2136,6 +2144,7 @@ def _dispatch_once_locked(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        dispatch_profiles=dispatch_profiles,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
@@ -2146,9 +2155,11 @@ def _dispatch_once_locked(
         if not row_assignee:
             # Honour kanban.default_assignee so an unassigned task doesn't
             # park in 'ready' forever.
-            if not default_assignee or not _apply_default_assignee(
+            if (not default_assignee
+                    or (dispatch_profiles is not None and default_assignee not in dispatch_profiles)
+                    or not _apply_default_assignee(
                 conn, row["id"], default_assignee, dry_run=dry_run,
-            ):
+            )):
                 result.skipped_unassigned.append(row["id"])
                 continue
             row_assignee = default_assignee

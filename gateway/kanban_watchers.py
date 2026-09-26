@@ -10,6 +10,7 @@ in ``kanban_watchers_common``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -231,10 +232,24 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return None
 
-        # Single-dispatcher backstop (see _acquire_singleton_lock). The lock
-        # lives at the machine-global kanban root, so it serialises ALL gateways.
+        # Homes with explicit, disjoint dispatch scopes each need their own
+        # dispatcher. The per-board tick lock serializes their database work;
+        # this process-lifetime lock prevents duplicate dispatchers for the
+        # same scope. Unscoped homes retain the legacy global singleton.
         self._kanban_dispatcher_lock_handle = None
         _lock_path = _kb.kanban_home() / "kanban" / ".dispatcher.lock"
+        if "dispatch_profiles" in kanban_cfg:
+            from hermes_cli.profiles import normalize_profile_name
+            raw_scope = kanban_cfg["dispatch_profiles"]
+            names = raw_scope if isinstance(raw_scope, (list, tuple)) else str(raw_scope).split(",")
+            scope = set()
+            for name in names:
+                try:
+                    scope.add(normalize_profile_name(str(name)))
+                except ValueError:
+                    continue
+            digest = hashlib.sha256(",".join(sorted(scope)).encode()).hexdigest()[:16]
+            _lock_path = _kb.kanban_home() / "kanban" / f".dispatcher.{digest}.lock"
         _lock_handle, _lock_state = _acquire_singleton_lock(_lock_path)
         if _lock_state == "contended":
             logger.info("kanban dispatcher: another gateway already holds the dispatcher "

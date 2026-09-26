@@ -42,6 +42,7 @@ class _DispatcherSettings:
     reconcile_orphans: bool
     default_assignee: Optional[str]
     max_in_progress_per_profile: Optional[int]
+    dispatch_profiles: Optional[frozenset[str]] = None
 
 
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
@@ -102,6 +103,19 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         logger.info("kanban dispatcher: default_assignee=%r (unassigned ready tasks "
                     "will route to this profile)", default_assignee)
 
+    dispatch_profiles = None
+    if "dispatch_profiles" in kanban_cfg:
+        from hermes_cli.profiles import normalize_profile_name
+        raw_profiles = kanban_cfg["dispatch_profiles"]
+        names = raw_profiles if isinstance(raw_profiles, (list, tuple)) else str(raw_profiles).split(",")
+        accepted = set()
+        for name in names:
+            try:
+                accepted.add(normalize_profile_name(str(name)))
+            except ValueError:
+                continue
+        dispatch_profiles = frozenset(accepted)
+
     return _DispatcherSettings(
         interval=interval,
         max_spawn=max_spawn,
@@ -115,6 +129,7 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         # Per-profile concurrency cap: no single profile's local model / API
         # quota / browser pool gets overwhelmed by a fan-out.
         max_in_progress_per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"),
+        dispatch_profiles=dispatch_profiles,
     )
 
 

@@ -14,6 +14,7 @@ import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,28 @@ _USAGE_KEYS = (
     "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens", "api_calls",
     "model", "provider", "session_id", "completed", "partial", "interrupted", "turn_exit_reason",
 )
+
+
+def _first_visible_token_recorder(progress_file: str):
+    """Return a callback that stamps the first visible text delta once."""
+    seen = False
+
+    def record(delta: object) -> None:
+        nonlocal seen
+        if seen or not isinstance(delta, str) or not delta.strip():
+            return
+        seen = True
+        try:
+            fd = os.open(progress_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, (json.dumps({"event": "first_token",
+                                          "at": datetime.now(UTC).isoformat()}) + "\n").encode())
+            finally:
+                os.close(fd)
+        except OSError:
+            pass  # Observability must not fail the invocation.
+
+    return record
 
 # Counters summed per auxiliary task (vision, compression, title_generation, ...) into the
 # ``auxiliary`` block of the report. The main-loop keys above stay main-loop-only (backward
@@ -245,6 +268,7 @@ def run_oneshot(
     usage_file: Optional[str] = None,
     resume: Optional[str] = None,
     reasoning: object = None,
+    progress_file: Optional[str] = None,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -305,6 +329,7 @@ def run_oneshot(
                 resume=resume,
                 reasoning=reasoning,
                 ledger=bool(usage_file),
+                progress_file=progress_file,
             )
         except BaseException as exc:  # noqa: BLE001
             # Capture anything escaping the agent (OSError from prompt_toolkit on a non-TTY pipe,
@@ -497,6 +522,7 @@ def _run_agent(
     resume: Optional[str] = None,
     reasoning: object = None,
     ledger: bool = False,
+    progress_file: Optional[str] = None,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn, run one conversation, and return
     ``(final_response, run_result)``. Imports are local to keep CLI startup cheap. *ledger* (set when
@@ -578,6 +604,8 @@ def _run_agent(
         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
         agent.suppress_status_output = True
         agent.stream_delta_callback = None
+        if progress_file:
+            agent.stream_delta_callback = _first_visible_token_recorder(progress_file)
         agent.tool_gen_callback = None
 
         aux_before = _auxiliary_usage(session_db, resume_sid) if ledger else {}
