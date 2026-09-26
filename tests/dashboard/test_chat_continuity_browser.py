@@ -41,9 +41,17 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     if not (dist / "index.html").exists():
         pytest.skip("Build the candidate dashboard with npm run build -w web")
 
+    # Lifespan reads these flags and can otherwise reap a host gateway, run
+    # cron, or mint a guest credential. Clear inherited Hermes controls before
+    # importing the server, then supply only fixture-owned paths.
+    for name in tuple(os.environ):
+        if name.startswith("HERMES_"):
+            monkeypatch.delenv(name)
+
     # Both Path.home() and HERMES_HOME must resolve inside this test. A named
     # profile under the candidate's real ~/.hermes would violate isolation.
     home = tmp_path / "user"
+    home.mkdir()
     hermes_home = tmp_path / "hermes-fixture"
     profile_home = hermes_home / "profiles" / "acceptance"
     profile_home.mkdir(parents=True)
@@ -51,6 +59,8 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("HERMES_TEST_ISOLATION", str(hermes_home))
+    for name in ("CONFIG", "CACHE", "DATA", "STATE"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
     hermes_home.mkdir(exist_ok=True)
 
     session_id = "browser-continuity-session"
@@ -66,10 +76,18 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     def fixture_argv(*, resume=None, sidecar_url=None, profile=None, active_session_file=None):
         assert profile == "acceptance"
         assert resume in (None, session_id)
-        child_env = os.environ.copy()
-        child_env["HERMES_HOME"] = str(profile_home)
-        child_env["HERMES_TUI_RESUME"] = resume or "fixture-fresh"
-        child_env["PYTHONPATH"] = str(ROOT)
+        child_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home),
+            "HERMES_HOME": str(profile_home),
+            "HERMES_TUI_RESUME": resume or "fixture-fresh",
+            "HERMES_TEST_ISOLATION": str(hermes_home),
+            "PYTHONPATH": str(ROOT),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
+        if os.environ.get("LANG"):
+            child_env["LANG"] = os.environ["LANG"]
         return [sys.executable, str(PTY_CHILD)], str(ROOT), child_env
 
     monkeypatch.setattr(web_server_chat, "_resolve_chat_argv", fixture_argv)
@@ -92,9 +110,19 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
         while not server.started and time.monotonic() < deadline:
             time.sleep(0.05)
         assert server.started, "temporary dashboard did not bind"
+        browser_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home),
+            "HERMES_HOME": str(hermes_home),
+            "HERMES_TEST_ISOLATION": str(hermes_home),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
+        if os.environ.get("LANG"):
+            browser_env["LANG"] = os.environ["LANG"]
         run = subprocess.run(
             ["node", str(BROWSER), f"http://127.0.0.1:{port}", session_id, chrome],
-            cwd=ROOT, env={**os.environ, "HOME": str(home)}, capture_output=True,
+            cwd=ROOT, env=browser_env, capture_output=True,
             text=True, timeout=65, check=False,
         )
         assert run.returncode == 0, f"browser fixture failed:\n{run.stdout}\n{run.stderr}"
