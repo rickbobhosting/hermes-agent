@@ -301,6 +301,32 @@ def test_transfer_under_profile_home_override_targets_acquisition_registry(
     assert [entry["session_id"] for entry in entries] == ["after"]
 
 
+def test_transfer_collision_preserves_both_live_leases(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    placeholder, reason = active_sessions.try_acquire_active_session(
+        session_id="runtime-placeholder", surface="tui", config={},
+    )
+    owner, owner_reason = active_sessions.try_acquire_active_session(
+        session_id="durable-session", surface="cli", config={},
+    )
+    assert placeholder is not None and owner is not None
+    assert reason is None and owner_reason is None
+    try:
+        before = active_sessions.active_session_registry_snapshot()
+        assert not active_sessions.transfer_active_session(
+            placeholder, session_id="durable-session", metadata={"changed": True},
+        )
+        assert placeholder.session_id == "runtime-placeholder"
+        assert active_sessions.active_session_registry_snapshot() == before
+        owner.release()
+        assert active_sessions.transfer_active_session(
+            placeholder, session_id="durable-session",
+        )
+    finally:
+        placeholder.release()
+        owner.release()
+
+
 def test_liveness_registry_corruption_fails_closed_without_overwrite(
     tmp_path, monkeypatch
 ):

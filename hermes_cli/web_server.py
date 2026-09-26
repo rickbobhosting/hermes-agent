@@ -23,7 +23,6 @@ import time
 import urllib.parse
 
 from hermes_cli.install_identity import get_install_id as _shared_get_install_id
-from hermes_cli.pty_session import run_reaper
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -144,6 +143,7 @@ async def _lifespan(app: "FastAPI"):
     app.state.event_channels = {}  # dict[str, set]
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}  # dict[str, Path]
+    app.state.pty_active_session_file_claims = {}  # dict[str, int]
     # Serializes chat-argv resolution so concurrent /api/pty connections don't
     # overlap ``npm install`` / ``npm run build``. Locks live on app.state (not
     # module globals) so they bind to the running loop, not the import-time one.
@@ -228,8 +228,10 @@ async def _lifespan(app: "FastAPI"):
         )
         cron_thread.start()
 
-    # Reap idle/dead keep-alive PTY sessions (30-min TTL).
-    pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
+    # Retained PTYs stay alive through browser absence; only exited children
+    # and their per-channel breadcrumbs are reaped here.
+    from hermes_cli.web_routers.chat_ws import reap_pty_artifacts
+    pty_reaper_task = asyncio.create_task(reap_pty_artifacts(app))
     # Periodic authenticated self-test feeding the ``dashboard`` component on /api/status.
     selftest_task = asyncio.create_task(_dashboard_selftest_loop())
     # Live auto-archive timer, independent of list requests.
@@ -270,6 +272,10 @@ async def _lifespan(app: "FastAPI"):
         selftest_task.cancel()
         auto_archive_task.cancel()
         await PTY_REGISTRY.close_all()
+        for path in app.state.pty_active_session_files.values():
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+        app.state.pty_active_session_files.clear()
         # Stop the managed llama-server with its parent (an orphan pins VRAM).
         try:
             from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime

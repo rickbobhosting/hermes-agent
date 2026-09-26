@@ -359,6 +359,13 @@ function appendSessionFilters(url: string, options: SessionQueryOptions): string
 export const api = {
   buildWsUrl,
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getRetainedPtySessions: () =>
+    fetchJSON<RetainedPtySessionsResponse>("/api/pty/sessions"),
+  stopRetainedPtySession: (id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/pty/sessions/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -2017,6 +2024,22 @@ export interface PaginatedSessions {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface RetainedPtySession {
+  id: string;
+  alive: boolean;
+  attached: boolean;
+  created_at: number;
+  last_attached_at: number | null;
+  last_detached_at: number | null;
+  buffer_bytes: number;
+  buffer_truncated: boolean;
+  metadata: { profile?: string | null; resume?: string | null };
+}
+
+export interface RetainedPtySessionsResponse {
+  sessions: RetainedPtySession[];
 }
 
 export interface EnvVarInfo {

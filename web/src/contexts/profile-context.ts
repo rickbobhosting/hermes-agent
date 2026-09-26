@@ -6,6 +6,8 @@ export interface ProfileContextValue {
   profile: string;
   /** The profile the dashboard process itself runs under. */
   currentProfile: string;
+  /** Initial active-profile lookup has settled; chat may choose its scope. */
+  ready: boolean;
   /** Known profile names (includes "default"). */
   profiles: string[];
   setProfile: (name: string) => void;
@@ -14,6 +16,7 @@ export interface ProfileContextValue {
 export const ProfileContext = createContext<ProfileContextValue>({
   profile: "",
   currentProfile: "default",
+  ready: false,
   profiles: [],
   setProfile: () => {},
 });

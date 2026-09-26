@@ -569,6 +569,15 @@ def transfer_active_session(
         if loaded is None:
             return False
         entries = loaded[1]
+        # A placeholder becoming durable must not claim an identity already
+        # owned by another live surface. Keep the original lease unchanged so
+        # the caller can retry or release it safely.
+        if any(
+            str(entry.get("lease_id") or "") != lease.lease_id
+            and str(entry.get("session_id") or "") == new_session_id
+            for entry in entries
+        ):
+            return False
         own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
         if own is not None:
             own["session_id"] = new_session_id

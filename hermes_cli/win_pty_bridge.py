@@ -139,6 +139,26 @@ class WinPtyBridge:
             await asyncio.shield(self._settle_or_stop_write(write_future))
             raise
 
+    def write_owned(self, data: bytes, *, cancelled=None, ownership_lock=None,
+                    timeout: float = 1.0) -> bool:
+        """Best-effort ownership check for ConPTY's synchronous write API."""
+        if timeout <= 0 or (cancelled is not None and cancelled()):
+            return False
+        # pywinpty offers no nonblocking write or cancellation primitive.
+        # Check ownership under the lock, then release it before pywinpty's
+        # blocking call. Holding this lock through write would block the
+        # asyncio event loop when a browser takeover revokes its generation.
+        if ownership_lock is not None:
+            ownership_lock.acquire()
+        try:
+            if cancelled is not None and cancelled():
+                return False
+        finally:
+            if ownership_lock is not None:
+                ownership_lock.release()
+        wrote = self._write_blocking(data)
+        return wrote and not (cancelled is not None and cancelled())
+
     async def _settle_or_stop_write(self, write_future: asyncio.Future) -> None:
         """Let a cancelled write finish within the grace window; terminate only if it stalls."""
         try:

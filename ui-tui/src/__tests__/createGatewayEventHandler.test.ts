@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
@@ -83,6 +87,44 @@ describe('createGatewayEventHandler', () => {
     resetServerRequestsForTests()
     turnController.fullReset()
     patchUiState({ showReasoning: true })
+  })
+
+  it('publishes focused persistent-key rotations without following background sessions', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-tui-active-'))
+    const path = join(dir, 'active.json')
+    const previousPath = process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+    const ctx = buildCtx([])
+    const publishLocalEvent = vi.fn()
+    ctx.gateway.gw.publishLocalEvent = publishLocalEvent
+    process.env.HERMES_TUI_ACTIVE_SESSION_FILE = path
+    patchUiState({ sid: 'runtime01' })
+
+    try {
+      const onEvent = createGatewayEventHandler(ctx)
+      for (const [runtimeId, storedId] of [
+        ['runtime01', 'stored-a'],
+        ['runtime01', 'stored-b'],
+        ['background02', 'background-c']
+      ]) {
+        onEvent({
+          payload: { model: 'test/model', stored_session_id: storedId, skills: {}, tools: {} },
+          session_id: runtimeId,
+          type: 'session.info'
+        } as any)
+      }
+
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ session_id: 'stored-b' })
+      expect(publishLocalEvent).toHaveBeenCalledTimes(2)
+      expect(publishLocalEvent).toHaveBeenLastCalledWith({
+        payload: { session_key: 'stored-b' },
+        session_id: 'runtime01',
+        type: 'dashboard.active_session_changed'
+      })
+    } finally {
+      if (previousPath === undefined) delete process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+      else process.env.HERMES_TUI_ACTIVE_SESSION_FILE = previousPath
+      rmSync(dir, { force: true, recursive: true })
+    }
   })
 
   it('heals missed completion and blocking prompts only from the focused authoritative idle snapshot', () => {

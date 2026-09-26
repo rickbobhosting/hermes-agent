@@ -13,10 +13,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from agent.interrupt_scope import InterruptScope, bind_interrupt_scope
-from hermes_cli.pty_session import RegistryFull
+from hermes_cli.pty_session import AttachmentClosed, RegistryClosed, RegistryFull, SessionStopped
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_routers.chat_ws_errors import chat_start_failure_message
 from hermes_cli.web_server_chat import (
@@ -36,6 +36,7 @@ _ws_auth_reason = late("_ws_auth_reason", "hermes_cli.web_server_chat")
 _ws_client_reason = late("_ws_client_reason", "hermes_cli.web_server_chat")
 _ws_host_origin_reason = late("_ws_host_origin_reason", "hermes_cli.web_server_chat")
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = LateState("_DASHBOARD_EMBEDDED_CHAT_ENABLED")
+_require_token = late("_require_token")
 
 
 def _get_event_state(app: "FastAPI"):
@@ -51,6 +52,7 @@ def _get_event_state(app: "FastAPI"):
 
 
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_VALID_ATTACH_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 
 def _ws_auth_mode() -> str:
@@ -67,6 +69,16 @@ def _ws_auth_mode() -> str:
 
 async def _broadcast_event(app: Any, channel: str, payload: str) -> None:
     """Fan out one publisher frame to every subscriber on `channel`."""
+    try:
+        event = json.loads(payload)
+        params = event.get("params") if isinstance(event, dict) else None
+    except json.JSONDecodeError:
+        params = None
+    if isinstance(params, dict) and params.get("type") == "dashboard.active_session_changed":
+        actual = _channel_active_session(app, channel)
+        declared = (params.get("payload") or {}).get("session_key") if isinstance(params.get("payload"), dict) else None
+        if actual is None or actual != declared:
+            return
     event_channels, event_lock = _get_event_state(app)
     async with event_lock:
         subs = list(event_channels.get(channel, ()))
@@ -86,10 +98,127 @@ def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
 
 def _read_active_session_file(path: Path) -> Optional[str]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+        if len(raw) > 1024:
+            return None
+        data = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return str(data.get("session_id") or "").strip() or None
+    if not isinstance(data, dict):
+        return None
+    return _valid_resume(str(data.get("session_id") or ""))
+
+
+def _channel_active_session(app: FastAPI, channel: str) -> Optional[str]:
+    from hermes_cli.web_server import _get_pty_active_session_files
+
+    path = _get_pty_active_session_files(app).get(channel)
+    return _read_active_session_file(path) if path is not None else None
+
+
+def _valid_resume(value: Optional[str]) -> Optional[str]:
+    value = (value or "").strip()
+    if not value or len(value) > 512 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return None
+    return value
+
+
+def _canonical_profile(raw: Optional[str]) -> tuple[str, Optional[str]]:
+    from hermes_cli import profiles
+
+    requested = (raw or "").strip()
+    if not requested or requested.casefold() == "current":
+        return profiles.get_active_profile_name(), None
+    canonical = profiles.normalize_profile_name(requested)
+    profiles.validate_profile_name(canonical)
+    return canonical, canonical
+
+
+def _retained_channel(token: str, profile: str) -> str:
+    # Browser tokens are minted per profile/resume scope. This channel stays
+    # stable across socket replacements and is never taken from a WS query.
+    return f"pty-{token}"
+
+
+def _public_pty_snapshot(snapshot: dict) -> dict:
+    metadata = snapshot.get("metadata") or {}
+    return {
+        field: snapshot.get(field)
+        for field in ("id", "alive", "attached", "created_at", "last_attached_at",
+                      "last_detached_at", "buffer_bytes", "buffer_truncated")
+    } | {"metadata": {field: metadata.get(field) for field in ("profile", "resume") if metadata.get(field) is not None}}
+
+
+async def _forget_pty_channel(app: FastAPI, channel: str) -> None:
+    from hermes_cli.web_server import _get_pty_active_session_files
+
+    if _pty_claims(app).get(channel, 0):
+        return
+    snapshots = await _pty_registry().snapshots()
+    if any((snapshot.get("metadata") or {}).get("channel") == channel for snapshot in snapshots):
+        return
+    path = _get_pty_active_session_files(app).pop(channel, None)
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("Could not remove PTY session breadcrumb for channel %s", channel)
+
+
+def _pty_claims(app: FastAPI) -> dict[str, int]:
+    try:
+        return app.state.pty_active_session_file_claims
+    except AttributeError:
+        app.state.pty_active_session_file_claims = {}
+        return app.state.pty_active_session_file_claims
+
+
+async def _release_pty_claim(app: FastAPI, channel: str) -> None:
+    claims = _pty_claims(app)
+    remaining = claims.get(channel, 0) - 1
+    if remaining > 0:
+        claims[channel] = remaining
+        return
+    claims.pop(channel, None)
+    await _forget_pty_channel(app, channel)
+
+
+async def reap_pty_artifacts(app: FastAPI, *, interval: float = 60.0) -> None:
+    """Reap exited tasks and their channel files; elapsed absence is harmless."""
+    from hermes_cli.web_server import _get_pty_active_session_files
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _pty_registry().reap_idle()
+            for channel in list(_get_pty_active_session_files(app)):
+                await _forget_pty_channel(app, channel)
+        except Exception:
+            _log.exception("PTY artifact cleanup failed")
+
+
+def _pty_registry():
+    from hermes_cli.web_server_chat import PTY_REGISTRY
+    return PTY_REGISTRY
+
+
+@router.get("/api/pty/sessions")
+async def retained_pty_sessions(request: Request):
+    _require_token(request)
+    return {"sessions": [_public_pty_snapshot(s) for s in await _pty_registry().snapshots()]}
+
+
+@router.delete("/api/pty/sessions/{session_id}")
+async def stop_retained_pty_session(session_id: str, request: Request):
+    _require_token(request)
+    registry = _pty_registry()
+    selected = next((s for s in await registry.snapshots() if s["id"] == session_id), None)
+    if selected is None or not await registry.stop(session_id):
+        raise HTTPException(status_code=404, detail="Dashboard task not found.")
+    channel = (selected.get("metadata") or {}).get("channel")
+    if isinstance(channel, str):
+        await _forget_pty_channel(request.app, channel)
+    return {"ok": True, "id": session_id}
 
 
 def _ws_close_reason(text: str) -> str:
@@ -432,136 +561,158 @@ async def _pty_fail(ws: WebSocket, exc: BaseException) -> None:
 @router.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
     from hermes_cli.web_server_chat import PTY_REGISTRY, PtyBridge, PtyUnavailableError, _PTY_BRIDGE_AVAILABLE, _RESIZE_RE
+
     gate = await _ws_gate(ws, "pty")
     if gate is None:
         return
+    raw_attach = ws.query_params.get("attach") if "attach" in ws.query_params else None
+    if raw_attach is not None and not _VALID_ATTACH_RE.fullmatch(raw_attach):
+        await ws.close(code=4400, reason="invalid_attach_token")
+        return
+    attach_token = raw_attach.lower() if raw_attach is not None else None
     peer, mode, cred = gate
     await ws.accept()
     _log.info("pty accepted peer=%s mode=%s cred=%s", peer, mode, cred)
 
-    # Native Windows can't import the POSIX PTY bridge: say so and close cleanly.
     if not _PTY_BRIDGE_AVAILABLE:
-        await ws.send_text(
-            "\r\n\x1b[31mChat unavailable: the embedded terminal requires a "
-            "POSIX PTY, which native Windows Python doesn't provide.\x1b[0m\r\n"
-            "\x1b[33mInstall Hermes inside WSL2 to use the dashboard's /chat "
-            "tab — the rest of the dashboard works here.\x1b[0m\r\n"
-        )
-        await ws.close(code=1011)
+        await _pty_fail(ws, PtyUnavailableError("The embedded terminal is unavailable on this platform."))
         return
 
     raw_resume = ws.query_params.get("resume") or None
-    resume = raw_resume
-    profile = ws.query_params.get("profile") or None
-    channel = _channel_or_close_code(ws)
+    if raw_resume and not _valid_resume(raw_resume):
+        await _pty_fail(ws, ValueError("Invalid session resume target."))
+        return
+    try:
+        canonical_profile, resolver_profile = _canonical_profile(ws.query_params.get("profile"))
+    except ValueError as exc:
+        await _pty_fail(ws, exc)
+        return
+    channel = _retained_channel(attach_token, canonical_profile) if attach_token else _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
     force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
-    active_session_file: Optional[Path] = None
-
+    resume = None if force_fresh else _valid_resume(raw_resume)
+    implicit_resume = None
     if channel:
-        active_session_file = _active_session_file_for_channel(ws.app, channel)
+        claims = _pty_claims(ws.app)
+        claims[channel] = claims.get(channel, 0) + 1
+    claim_held = bool(channel)
+
+    async def release_claim() -> None:
+        nonlocal claim_held
+        if claim_held and channel:
+            claim_held = False
+            await _release_pty_claim(ws.app, channel)
+
+    active_session_file = _active_session_file_for_channel(ws.app, channel) if channel else None
+    if active_session_file is not None:
         if force_fresh:
-            resume = None
-            try:
-                active_session_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            active_session_file.unlink(missing_ok=True)
         elif not resume:
             resume = _read_active_session_file(active_session_file)
-            if resume:
-                # The client only pins the viewport to the bottom when it asked
-                # for `?resume=`; announce the implicit active-session replay so
-                # it gets the same follow-scroll treatment.
-                # See #93518.
-                await ws.send_json({"type": "resume", "id": resume})
+            implicit_resume = resume
 
-    resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
+    resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": resolver_profile}
     if active_session_file is not None:
         resolve_kwargs["active_session_file"] = str(active_session_file)
-
     try:
         argv, cwd, env = await _resolve_chat_argv_async(**resolve_kwargs)
-    except HTTPException as exc:  # unknown/invalid profile
+    except (HTTPException, SystemExit) as exc:
         await _pty_fail(ws, exc)
+        await release_claim()
         return
-    except SystemExit as exc:  # _make_tui_argv sys.exit(1)s when node/npm is missing
-        await _pty_fail(ws, exc)
-        return
+    except BaseException:
+        await release_claim()
+        raise
 
-    attach_token = ws.query_params.get("attach") or None
-    registry_resume = raw_resume
-    if raw_resume and env:
-        registry_resume = env.get("HERMES_TUI_RESUME") or raw_resume
-    if attach_token is not None and (registry_resume or profile):
-        # Key explicit resumes on their canonical target, never the active-session fallback.
-        attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
+    if attach_token is not None:
+        # A retained PTY owns its gateway process. Stopping the PTY then
+        # terminates the live agent instead of leaving an in-process turn.
+        import os
+        env = (os.environ if env is None else env).copy()
+        env.pop("HERMES_TUI_GATEWAY_URL", None)
 
-    def _spawn():
+    def spawn():
         return PtyBridge.spawn(argv, cwd=cwd, env=env)
 
     if attach_token is None:
-        # Legacy path: 1:1 socket<->PTY, killed on disconnect.
         try:
-            bridge = _spawn()
-        except PtyUnavailableError as exc:
+            bridge = await asyncio.to_thread(spawn)
+        except (PtyUnavailableError, FileNotFoundError, OSError) as exc:
             await _pty_fail(ws, exc)
+            await release_claim()
             return
-        except (FileNotFoundError, OSError) as exc:
-            await _pty_fail(ws, exc)
-            return
+        await release_claim()
+        if implicit_resume:
+            await ws.send_json({"type": "resume", "id": implicit_resume})
         await _legacy_pump(ws, bridge)
         return
 
-    # Keep-alive path: the PTY outlives this socket; reattach by token.
+    key = f"{attach_token}\0{canonical_profile}"
+    metadata = {"profile": canonical_profile, "resume": resume, "channel": channel}
     try:
-        session, _created = await PTY_REGISTRY.attach_or_spawn(attach_token, spawn=_spawn)
-    except (PtyUnavailableError, FileNotFoundError, OSError, RegistryFull) as exc:
+        session, created = await PTY_REGISTRY.attach_or_spawn(key, spawn=spawn, metadata=metadata)
+    except RegistryClosed:
+        await ws.close(code=1001, reason="pty_server_shutting_down")
+        await release_claim()
+        return
+    except SessionStopped:
+        await ws.close(code=4400, reason="pty_session_stopped")
+        await release_claim()
+        return
+    except RegistryFull as exc:
+        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        await ws.close(code=4429, reason="pty_capacity_reached")
+        await release_claim()
+        return
+    except (PtyUnavailableError, FileNotFoundError, OSError) as exc:
         await _pty_fail(ws, exc)
+        await release_claim()
         return
+    except BaseException:
+        await release_claim()
+        raise
+    if not created:
+        # The stored metadata follows the latest canonical resume target.
+        session.metadata.update(metadata)
+    await release_claim()
+    if implicit_resume:
+        await ws.send_json({"type": "resume", "id": implicit_resume})
 
-    # A fresh xterm can't rebuild the TUI from an arbitrary tail of alternate-
-    # screen differential output; reused PTYs emit a full frame after replay.
-    if not await session.attach(ws, force_redraw=not _created):
-        # attach() detaches itself when the client dropped mid-replay, and a socket
-        # superseded during replay is already closed by its replacement; only a
-        # stalled redraw write leaves THIS socket attached and worth closing.
-        if session._ws is ws:
-            await _close_stalled_pty_input(ws, path="keepalive-redraw")
-        PTY_REGISTRY.detach(attach_token, ws)
-        return
-
-    # Writer loop only: the session's drain task (one per PTY, inside the
-    # registry) forwards output to whichever socket is attached and ring-buffers
-    # it while detached. On child EOF it closes the attached socket with 4410,
-    # which unparks ws.receive() — same half-open protection as the legacy pump.
+    attachment = None
     try:
+        attachment = await session.attach(ws, force_redraw=not created)
         while True:
             try:
-                msg = await ws.receive()
-            except RuntimeError:  # receive() after the drain task already closed us
+                message = await ws.receive()
+            except RuntimeError:
                 break
-            if msg.get("type") == "websocket.disconnect":
+            if message.get("type") == "websocket.disconnect":
                 break
-            raw = msg.get("bytes")
+            raw = message.get("bytes")
             if raw is None:
-                text = msg.get("text")
+                text = message.get("text")
                 raw = text.encode("utf-8") if isinstance(text, str) else b""
             if not raw:
                 continue
-            # Resize escape is consumed locally, never written to the PTY.
             match = _RESIZE_RE.match(raw)
             if match and match.end() == len(raw):
-                session.bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
+                if not session.resize(attachment, cols=int(match.group(1)), rows=int(match.group(2))):
+                    break
                 continue
-            if not await session.write(ws, raw):
-                await _close_stalled_pty_input(ws, path="keepalive")
+            if not session.write(attachment, raw):
                 break
+    except AttachmentClosed as exc:
+        with contextlib.suppress(Exception):
+            await ws.close(code=exc.code, reason=exc.reason)
     except WebSocketDisconnect:
         pass
+    except Exception:
+        _log.exception("dashboard PTY attachment failed session=%s", session.id)
+        with contextlib.suppress(Exception):
+            await ws.close(code=1011, reason="pty_attachment_failed")
     finally:
-        # Detach only — the PTY keeps running for a reattach; the registry
-        # reaper closes it after the TTL (or immediately on process exit).
-        PTY_REGISTRY.detach(attach_token, ws)
+        if attachment is not None:
+            PTY_REGISTRY.detach(key, attachment)
 
 
 # --- /api/ws: JSON-RPC sidecar for the Chat tab. Drives the same
@@ -625,6 +776,11 @@ async def events_ws(ws: WebSocket) -> None:
     async with event_lock:
         event_channels.setdefault(channel, set()).add(ws)
     try:
+        if session_key := _channel_active_session(ws.app, channel):
+            await ws.send_json({
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "dashboard.active_session_changed", "payload": {"session_key": session_key}},
+            })
         while True:
             # Subscribers don't speak — receive() just blocks until disconnect.
             await ws.receive_text()

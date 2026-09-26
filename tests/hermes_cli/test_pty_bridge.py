@@ -258,6 +258,7 @@ class TestPtyBridgeClose:
 
     def test_close_signals_child_process_group(self, monkeypatch):
         sent: list[tuple[int, signal.Signals]] = []
+        group_alive = True
 
         class _FakeProc:
             pid = 12345
@@ -278,8 +279,14 @@ class TestPtyBridgeClose:
         fake = _FakeProc()
 
         def fake_killpg(pgid, sig):
+            nonlocal group_alive
+            if sig == 0:
+                if group_alive:
+                    return
+                raise ProcessLookupError
             sent.append((pgid, sig))
             fake.alive = False
+            group_alive = False
 
         monkeypatch.setattr(os, "getpgid", lambda pid: 67890)
         monkeypatch.setattr(os, "killpg", fake_killpg)
@@ -288,11 +295,48 @@ class TestPtyBridgeClose:
         bridge._proc = fake
         bridge._fd = -1
         bridge._closed = False
+        bridge._pgid = 67890
 
         bridge.close()
 
         assert sent == [(67890, signal.SIGHUP)]
         assert bridge._closed is True
+
+    def test_close_escalates_after_pty_leader_exits(self, monkeypatch):
+        sent = []
+        group_alive = True
+
+        class FakeProc:
+            pid = 12345
+
+            def isalive(self):
+                return False
+
+            def close(self, force=False):
+                self.closed = force
+
+        def fake_killpg(pgid, sig):
+            nonlocal group_alive
+            if sig == 0:
+                if not group_alive:
+                    raise ProcessLookupError
+                return
+            sent.append((pgid, sig))
+            if sig == signal.SIGKILL:
+                group_alive = False
+
+        monkeypatch.setattr(os, "killpg", fake_killpg)
+        monkeypatch.setattr("hermes_cli.pty_bridge._TERMINATION_GRACE_SECONDS", 0)
+        bridge = PtyBridge.__new__(PtyBridge)
+        bridge._proc = FakeProc()
+        bridge._fd = -1
+        bridge._closed = False
+        bridge._pgid = 67890
+
+        bridge.close()
+
+        assert sent == [(67890, signal.SIGHUP), (67890, signal.SIGTERM), (67890, signal.SIGKILL)]
+        assert bridge._proc.closed is True
 
 
 @skip_on_windows

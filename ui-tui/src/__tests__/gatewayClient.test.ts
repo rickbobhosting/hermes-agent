@@ -1,3 +1,6 @@
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 interface ListenerEntry {
@@ -95,7 +98,10 @@ const { FakeWebSocket } = vi.hoisted(() => {
   return { FakeWebSocket }
 })
 
+const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
+
 vi.mock('undici', () => ({ WebSocket: FakeWebSocket }))
+vi.mock('node:child_process', () => ({ spawn: spawnMock }))
 
 import {
   GatewayClient,
@@ -114,6 +120,7 @@ describe('GatewayClient websocket attach mode', () => {
     originalGatewayUrl = process.env.HERMES_TUI_GATEWAY_URL
     originalSidecarUrl = process.env.HERMES_TUI_SIDECAR_URL
     FakeWebSocket.reset()
+    spawnMock.mockReset()
     ;(globalThis as { WebSocket?: unknown }).WebSocket = FakeWebSocket as unknown as typeof WebSocket
   })
 
@@ -309,6 +316,54 @@ describe('GatewayClient websocket attach mode', () => {
     })
 
     gw.kill()
+  })
+
+  it('replays the latest focus after spawned sidecar reconnect and cancels retries on kill', () => {
+    vi.useFakeTimers()
+    try {
+      delete process.env.HERMES_TUI_GATEWAY_URL
+      process.env.HERMES_TUI_SIDECAR_URL = 'ws://gateway.test/api/pub?internal=secret&channel=demo'
+      spawnMock.mockReturnValue(Object.assign(new EventEmitter(), {
+        exitCode: null,
+        killed: false,
+        kill: vi.fn(() => true),
+        pid: 4242,
+        signalCode: null,
+        stderr: new PassThrough(),
+        stdin: new PassThrough(),
+        stdout: new PassThrough()
+      }))
+
+      const gw = new GatewayClient()
+      gw.start()
+      expect(spawnMock).toHaveBeenCalledOnce()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      gw.publishLocalEvent({
+        payload: { session_key: 'old' },
+        type: 'dashboard.active_session_changed'
+      })
+      gw.publishLocalEvent({
+        payload: { session_key: 'latest' },
+        type: 'dashboard.active_session_changed'
+      })
+
+      const first = FakeWebSocket.instances[0]!
+      first.close(1011)
+      vi.advanceTimersByTime(249)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      vi.advanceTimersByTime(1)
+      const second = FakeWebSocket.instances[1]!
+      second.open()
+      expect(second.sent).toHaveLength(1)
+      expect(JSON.parse(second.sent[0] ?? '{}').params.payload).toEqual({ session_key: 'latest' })
+
+      second.close(1011)
+      gw.kill()
+      vi.advanceTimersByTime(20_000)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('emits exit when attached websocket closes', async () => {

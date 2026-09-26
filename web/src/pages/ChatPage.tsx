@@ -104,21 +104,22 @@ import { errorMessage } from "@/lib/api-error";
 // ``rotate`` mints a new token — used when the user explicitly starts a fresh
 // session so the old keep-alive PTY is NOT reattached (the registry reaps it).
 const PTY_ATTACH_TOKEN_KEY = "hermes.pty.token.chat";
-function ptyAttachToken(rotate = false): string {
+function ptyAttachToken(scope: string, rotate = false): string {
+  const storageKey = `${PTY_ATTACH_TOKEN_KEY}.${encodeURIComponent(scope)}`;
   let t = "";
   if (!rotate) {
     try {
-      t = window.localStorage.getItem(PTY_ATTACH_TOKEN_KEY) ?? "";
+      t = window.localStorage.getItem(storageKey) ?? "";
     } catch {
       /* private mode / storage blocked */
     }
   }
-  if (!t) {
+  if (!/^[0-9a-f]{32}$/.test(t)) {
     const a = new Uint8Array(16);
     crypto.getRandomValues(a);
     t = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
     try {
-      window.localStorage.setItem(PTY_ATTACH_TOKEN_KEY, t);
+      window.localStorage.setItem(storageKey, t);
     } catch {
       /* ignore */
     }
@@ -126,19 +127,8 @@ function ptyAttachToken(rotate = false): string {
   return t;
 }
 
-// Channel id ties this chat tab's PTY child (publisher) to its sidebar
-// (subscriber).  Generated once per mount so a tab refresh starts a fresh
-// channel — the previous PTY child terminates with the old WS, and its
-// channel auto-evicts when no subscribers remain.
-function generateChannelId(scope?: string): string {
-  const prefix = scope ? "chat" : "chat-fresh";
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(
-    36,
-  )}`;
-}
+// The sidecar publisher remains in the retained PTY across browser refreshes.
+// Its event channel therefore follows the same stable attachment identity.
 
 // Colors for the terminal body.  Matches the dashboard's dark teal canvas
 // with cream foreground — we intentionally don't pick monokai or a loud
@@ -226,6 +216,18 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setHasActivated((prev) => latchChatActivation(prev, isActive));
   }, [isActive]);
   const [searchParams, setSearchParams] = useSearchParams();
+  const resumeParam = searchParams.get("resume");
+  const { profile: scopedProfile, ready: profileReady } = useProfileScope();
+  const profileScopeReady = Boolean(scopedProfile.trim()) || profileReady;
+  const attachScope = `${resumeParam ?? ""}\0${scopedProfile}`;
+  const [attachIdentity, setAttachIdentity] = useState(() => ({
+    scope: attachScope,
+    token: ptyAttachToken(attachScope),
+  }));
+  const attachToken = attachIdentity.scope === attachScope
+    ? attachIdentity.token
+    : ptyAttachToken(attachScope);
+  const channel = `pty-${attachToken}`;
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
   // In gated (OAuth) mode the server intentionally omits the session token —
@@ -306,6 +308,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [clearReconnectTimer]);
   const startFreshPty = useCallback(() => {
     forceFreshPtyRef.current = true;
+    setAttachIdentity({ scope: attachScope, token: ptyAttachToken(attachScope, true) });
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     blockedInputNoticeRef.current = false;
@@ -316,12 +319,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setReconnectGaveUp(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer]);
+  }, [attachScope, clearReconnectTimer]);
   const startFreshDashboardChat = useCallback(() => {
     const next = new URLSearchParams(searchParams);
 
     next.delete("resume");
     forceFreshPtyRef.current = true;
+    const nextScope = `\0${scopedProfile}`;
+    setAttachIdentity({ scope: nextScope, token: ptyAttachToken(nextScope, true) });
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     blockedInputNoticeRef.current = false;
@@ -333,7 +338,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setReconnectGaveUp(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer, searchParams, setSearchParams]);
+  }, [clearReconnectTimer, scopedProfile, searchParams, setSearchParams]);
   // Clear mobile-input tracking refs when the tab is hidden so stale state
   // from a previous /chat visit doesn't cause the mobile-replacement logic
   // to misfire on the next activation (#106403: repeated last character).
@@ -401,15 +406,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // Sessions page relies on `/chat?resume=<id>` changing at runtime, so we must
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
-  const resumeParam = searchParams.get("resume");
   // Profile-scoped chat: spawn the PTY under the globally selected
   // management profile. Changing it remounts the terminal (key below /
   // effect dep) so the user explicitly starts a fresh scoped session.
-  const { profile: scopedProfile } = useProfileScope();
-  const channel = useMemo(
-    () => generateChannelId(`${resumeParam ?? ""}\0${scopedProfile}`),
-    [resumeParam, scopedProfile],
-  );
   const titleScope = `${channel}\0${reconnectNonce}`;
   const sessionTitle =
     sessionTitleState.scope === titleScope ? sessionTitleState.title : null;
@@ -559,7 +558,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // until the chat tab has been activated. Prevents the persistently
     // mounted, hidden ChatPage from opening `/api/pty` on every dashboard
     // page. Sticky, so switching away from /chat keeps the PTY alive.
-    if (!hasActivated) return;
+    if (!hasActivated || !profileScopeReady) return;
 
     const host = hostRef.current;
     if (!host) return;
@@ -1254,7 +1253,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Keep-alive identity: reattach to this tab's living PTY across
       // refresh/transient drops. A forced-fresh start rotates the token so
       // the previous keep-alive PTY is not reattached (registry reaps it).
-      params.attach = ptyAttachToken(forceFresh);
+      params.attach = attachToken;
       // Profile-scoped chat: the PTY child gets HERMES_HOME pointed at the
       // selected profile, so the conversation runs with that profile's model,
       // skills, memory, and sessions (see web_server._resolve_chat_argv).
@@ -1631,6 +1630,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
   }, [
     hasActivated,
+    profileScopeReady,
     channel,
     clearReconnectTimer,
     resumeParam,

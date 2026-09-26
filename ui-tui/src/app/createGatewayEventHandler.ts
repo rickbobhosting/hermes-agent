@@ -17,6 +17,7 @@ import type {
   SessionMostRecentResponse
 } from '../gatewayTypes.js'
 import { billingDialogCopy } from '../lib/billingDialog.js'
+import { publishDashboardActiveSession } from '../lib/activeSessionFile.js'
 import { isTodoDone } from '../lib/liveProgress.js'
 import { openExternalUrl } from '../lib/openExternalUrl.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
@@ -435,7 +436,7 @@ const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): Sub
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: AnyGatewayEvent) => void {
   syncThemeToTerminalBackground()
 
-  const { rpc } = ctx.gateway
+  const { gw, rpc } = ctx.gateway
   const { STARTUP_RESUME_ID, newSession, recoverSidRef, resumeById, setCatalog } = ctx.session
   const { bellOnComplete, bellOnPrompt, stdout, sys } = ctx.system
 
@@ -804,6 +805,12 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         if (!info) {
           return
+        }
+
+        // Model/compression transitions can rotate the durable key while the
+        // runtime handle stays the same. Publish only the focused session.
+        if (sid && info.stored_session_id) {
+          publishDashboardActiveSession(gw, info.stored_session_id, sid)
         }
 
         // A replayed snapshot can be the only terminal signal after reconnect.

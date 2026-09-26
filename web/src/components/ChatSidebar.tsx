@@ -10,7 +10,7 @@
  *      design. The model badge does NOT come from here: it reads the
  *      effective config model over REST (`/api/model/info`), and the model
  *      picker writes config over REST (`/api/model/set`) then offers a
- *      dashboard reload so the running chat adopts the new model.
+ *      dashboard reload while keeping the running chat attached.
  *
  *   2. **Event subscriber** (/api/events?channel=…) — passive, receives
  *      every dispatcher emit from the PTY-side `tui_gateway.entry` that
@@ -32,6 +32,7 @@ import { Card } from '@nous-research/ui/ui/components/card'
 import { ModelPickerDialog } from '@/components/ModelPickerDialog'
 import { ModelReloadConfirm } from '@/components/ModelReloadConfirm'
 import { ReasoningPicker } from '@/components/ReasoningPicker'
+import { RetainedPtyTasks } from '@/components/RetainedPtyTasks'
 import { GatewayClient, type ConnectionState } from '@/lib/gatewayClient'
 import { EventsFeedClient } from '@/lib/eventsFeedClient'
 import { api } from '@/lib/api'
@@ -140,11 +141,9 @@ export function ChatSidebar({
   // Bumped on model change/save so ReasoningPicker re-reads the saved effort
   // (config is profile-scoped the same way the model badge is).
   const [modelRefreshKey, setModelRefreshKey] = useState(0)
-  // Set after the picker saves a model and the user declines the reload: config
-  // is updated but the running session keeps its model until rebuilt.
+  // Set after the picker saves a model and the user declines the reload.
   const [modelNotice, setModelNotice] = useState<string | null>(null)
-  // Short name of a just-saved model awaiting confirm to reload (a fresh chat
-  // session is how the running chat adopts it; we confirm before discarding it).
+  // Short name of a just-saved model awaiting a dashboard reload offer.
   const [pendingReloadModel, setPendingReloadModel] = useState<string | null>(null)
 
   const refreshEffectiveModel = useCallback(() => {
@@ -380,6 +379,7 @@ export function ChatSidebar({
         className
       )}
     >
+      <RetainedPtyTasks />
       <Card className="flex items-center justify-between gap-2 px-3 py-2">
         <div className="min-w-0 flex-1">
           <div className="text-display text-xs tracking-wider text-text-tertiary">model</div>
@@ -416,7 +416,7 @@ export function ChatSidebar({
             refreshKey={modelRefreshKey}
             onChanged={effort =>
               setModelNotice(
-                `Reasoning effort set to ${effort}. Run /new or refresh the page to apply it to this chat.`
+                `Reasoning effort set to ${effort}. A future eligible session can use the saved setting.`
               )
             }
           />
@@ -499,7 +499,7 @@ export function ChatSidebar({
             // and calls back; don't announce until the user confirms.
             if (!result.confirm_required) {
               refreshEffectiveModel()
-              // Ask before reloading: applying the model starts a fresh chat.
+              // Offer a dashboard reload without discarding the retained chat.
               setPendingReloadModel(model.split('/').slice(-1)[0])
             }
             return result
@@ -516,7 +516,7 @@ export function ChatSidebar({
         onCancel={() => {
           const m = pendingReloadModel
           setPendingReloadModel(null)
-          setModelNotice(`Model set to ${m}. Run /new or refresh the page to apply it to this chat.`)
+          setModelNotice(`Model set to ${m}. Eligible unpinned chats can use it on a future turn.`)
         }}
       />
     </aside>

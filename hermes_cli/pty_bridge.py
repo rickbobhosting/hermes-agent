@@ -17,8 +17,9 @@ import signal
 import struct
 import sys
 import termios
+import threading
 import time
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 try:
     import ptyprocess  # type: ignore
@@ -42,6 +43,7 @@ PTY_HOST_DASHBOARD = "dashboard"
 _MIN_DIMENSION = 1
 _MAX_COLS = 2000
 _MAX_ROWS = 1000
+_TERMINATION_GRACE_SECONDS = 0.5
 
 
 def _clamp_dimension(value: int, maximum: int) -> int:
@@ -73,6 +75,14 @@ class PtyBridge:
         self._fd: int = proc.fd
         self._closed = False
         os.set_blocking(self._fd, False)
+        # forkpty makes the child a process-group leader. Remember the group
+        # before the leader exits so shutdown can still reap helper children.
+        try:
+            pgid = os.getpgid(proc.pid)
+            own_pgid = os.getpgrp()
+            self._pgid = pgid if pgid > 0 and pgid != own_pgid else None
+        except OSError:
+            self._pgid = None
 
     @classmethod
     def is_available(cls) -> bool:
@@ -204,6 +214,56 @@ class PtyBridge:
                 return False
         return True
 
+    def write_owned(
+        self,
+        data: bytes,
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+        ownership_lock: Optional[threading.Lock] = None,
+        timeout: float = 1.0,
+    ) -> bool:
+        """Bound a retained attachment's input and fence revoked controllers.
+
+        The lock covers only each nonblocking write syscall. A takeover can
+        cancel a generation while this worker waits for PTY capacity.
+        """
+        if self._closed or not data:
+            return not data
+        if timeout <= 0:
+            return False
+        deadline = time.monotonic() + timeout
+        view = memoryview(data)
+        while view:
+            if self._closed or (cancelled is not None and cancelled()):
+                return False
+            if ownership_lock is not None:
+                ownership_lock.acquire()
+            try:
+                if self._closed or (cancelled is not None and cancelled()):
+                    return False
+                try:
+                    n = os.write(self._fd, view)
+                except OSError as exc:
+                    if exc.errno in {errno.EIO, errno.EBADF, errno.EPIPE}:
+                        return False
+                    if exc.errno not in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                        raise
+                    n = 0
+            finally:
+                if ownership_lock is not None:
+                    ownership_lock.release()
+            if n > 0:
+                view = view[n:]
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                select.select([], [self._fd], [], min(0.05, remaining))
+            except (OSError, ValueError):
+                return False
+        return True
+
     def resize(self, cols: int, rows: int) -> None:
         """Forward a terminal resize to the child via ``TIOCSWINSZ``.
 
@@ -221,33 +281,84 @@ class PtyBridge:
             pass
 
     def close(self) -> None:
-        """Terminate the child (SIGHUP → SIGTERM → SIGKILL, 0.5s grace each), reap it so the
-        dashboard process never leaks zombies, and close fds. Idempotent.
+        """Terminate the child process group and close its file descriptors.
+
+        Idempotent. Reaping the child is important so we don't leak zombies
+        across the lifetime of the dashboard process. Group liveness is
+        checked independently of the PTY leader because the leader can exit
+        before gateway/helper descendants do.
         """
         if self._closed:
             return
         self._closed = True
 
+        pgid = getattr(self, "_pgid", None)
+        if pgid is None:
+            try:
+                pgid = os.getpgid(self._proc.pid)  # windows-footgun: ok -- POSIX-only module
+            except Exception:
+                pgid = None
         try:
-            pgid = os.getpgid(self._proc.pid)  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-        except Exception:
+            if pgid == os.getpgrp():
+                pgid = None
+        except OSError:
             pgid = None
 
-        # Signal the whole process group, not just the PTY leader: the dashboard TUI starts helper
-        # children (e.g. the Python slash worker) and killing only the leader strands them.
-        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-            if not self._proc.isalive():
-                break
+        def _reap_leader_status() -> bool:
             try:
-                if pgid is not None:
-                    os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-                else:
-                    self._proc.kill(sig)
+                return bool(self._proc.isalive())
             except Exception:
-                pass
-            deadline = time.monotonic() + 0.5
-            while self._proc.isalive() and time.monotonic() < deadline:
-                time.sleep(0.02)
+                return False
+
+        def _group_is_alive() -> bool:
+            if pgid is None:
+                return False
+            try:
+                os.killpg(pgid, 0)  # windows-footgun: ok -- POSIX-only module
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError as exc:
+                return exc.errno != errno.ESRCH
+            return True
+
+        # SIGHUP is the conventional "your terminal went away" signal.
+        # Send it to the whole foreground process group, not just the PTY
+        # leader: the dashboard TUI starts helper children such as the Python
+        # slash worker, and killing only the leader can strand those helpers.
+        if pgid is not None:
+            for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):  # windows-footgun: ok -- POSIX-only module
+                _reap_leader_status()
+                try:
+                    os.killpg(pgid, sig)  # windows-footgun: ok -- POSIX-only module
+                except ProcessLookupError:
+                    break
+                except Exception:
+                    pass
+                deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+                while time.monotonic() < deadline:
+                    _reap_leader_status()
+                    if not _group_is_alive():
+                        break
+                    time.sleep(0.02)
+                if not _group_is_alive():
+                    break
+        else:
+            # Defensive fallback for an unexpected PtyProcess implementation
+            # that does not create a distinct process group. This also avoids
+            # signaling the dashboard's own group if a fake/misconfigured proc
+            # reports the parent's PGID.
+            for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+                if not _reap_leader_status():
+                    break
+                try:
+                    self._proc.kill(sig)
+                except Exception:
+                    pass
+                deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+                while _reap_leader_status() and time.monotonic() < deadline:
+                    time.sleep(0.02)
 
         try:
             self._proc.close(force=True)

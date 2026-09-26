@@ -56,7 +56,11 @@ def _close_rpc_stdin_on_exec() -> None:
 
 def _install_sidecar_publisher() -> None:
     """Mirror every dispatcher emit to the dashboard sidebar via WS when set (best-effort)."""
-    url = os.environ.get("HERMES_TUI_SIDECAR_URL")
+    # The URL carries the dashboard's transport credential. Consume it and
+    # the related focus/attach handles before any agent tool can spawn.
+    url = os.environ.pop("HERMES_TUI_SIDECAR_URL", None)
+    os.environ.pop("HERMES_TUI_GATEWAY_URL", None)
+    os.environ.pop("HERMES_TUI_ACTIVE_SESSION_FILE", None)
     if not url:
         return
     from tui_gateway.event_publisher import WsPublisherTransport
