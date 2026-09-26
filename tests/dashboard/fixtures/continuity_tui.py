@@ -53,7 +53,9 @@ def main() -> None:
             db.append_message(session_id, "assistant", reply)
             for part in ("fixture ", reply.removeprefix("fixture ")):
                 emit(part)
-                time.sleep(0.08)
+                # Keep the candidate's first chunk distinct on the browser
+                # WebSocket so the handoff fixture can detect buffering.
+                time.sleep(0.35 if prompt == "candidate turn one" else 0.08)
             emit("\r\nfixture ready> ")
     finally:
         db.close()
