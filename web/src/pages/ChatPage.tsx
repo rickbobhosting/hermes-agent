@@ -42,6 +42,17 @@ import { createPtyCompositionForwarder } from "@/lib/pty-composition";
 import { shouldRestoreTerminalFocus } from "@/lib/pty-focus";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
 import {
+  ptyAttachIdentity,
+  ptyAttachScope,
+  ptyBindSessionIdentity,
+  ptyRecoverSessionLineage,
+  ptyTerminalRejection,
+  resolvedPtyResume,
+  validatedPtySessionKey,
+  type PtyAttachIdentity,
+  type PtyResumeResolution,
+} from "@/lib/pty-attach";
+import {
   PTY_CONNECTING_TIMEOUT_MS,
   PTY_KEEPALIVE_INTERVAL_MS,
   PTY_RECONNECT_INPUT_MESSAGE,
@@ -97,35 +108,6 @@ import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { errorMessage } from "@/lib/api-error";
-
-// Stable per-browser token identifying THIS chat tab's keep-alive PTY session.
-// Sent as ?attach=; lets a refresh/disconnect reattach to the same live process
-// instead of spawning a fresh one. Per-localStorage, so other devices can't grab it.
-// ``rotate`` mints a new token — used when the user explicitly starts a fresh
-// session so the old keep-alive PTY is NOT reattached (the registry reaps it).
-const PTY_ATTACH_TOKEN_KEY = "hermes.pty.token.chat";
-function ptyAttachToken(scope: string, rotate = false): string {
-  const storageKey = `${PTY_ATTACH_TOKEN_KEY}.${encodeURIComponent(scope)}`;
-  let t = "";
-  if (!rotate) {
-    try {
-      t = window.localStorage.getItem(storageKey) ?? "";
-    } catch {
-      /* private mode / storage blocked */
-    }
-  }
-  if (!/^[0-9a-f]{32}$/.test(t)) {
-    const a = new Uint8Array(16);
-    crypto.getRandomValues(a);
-    t = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
-    try {
-      window.localStorage.setItem(storageKey, t);
-    } catch {
-      /* ignore */
-    }
-  }
-  return t;
-}
 
 // The sidecar publisher remains in the retained PTY across browser refreshes.
 // Its event channel therefore follows the same stable attachment identity.
@@ -217,17 +199,32 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [isActive]);
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
-  const { profile: scopedProfile, ready: profileReady } = useProfileScope();
+  const { profile: scopedProfile, currentProfile, ready: profileReady } = useProfileScope();
+  const selectedProfile = (scopedProfile || currentProfile || "default").trim().toLowerCase();
   const profileScopeReady = Boolean(scopedProfile.trim()) || profileReady;
-  const attachScope = `${resumeParam ?? ""}\0${scopedProfile}`;
-  const [attachIdentity, setAttachIdentity] = useState(() => ({
-    scope: attachScope,
-    token: ptyAttachToken(attachScope),
-  }));
-  const attachToken = attachIdentity.scope === attachScope
-    ? attachIdentity.token
-    : ptyAttachToken(attachScope);
-  const channel = `pty-${attachToken}`;
+  const [resumeResolution, setResumeResolution] = useState<PtyResumeResolution | null>(null);
+  const resolvedResume = resolvedPtyResume(resumeParam, selectedProfile, resumeResolution);
+  const attachTarget = useMemo(() => profileScopeReady && resolvedResume !== undefined
+    ? {
+        profile: selectedProfile,
+        resume: resolvedResume,
+        resumeAliases: resumeResolution?.profile === selectedProfile &&
+          resumeResolution.target === resolvedResume ? resumeResolution.path : undefined,
+      }
+    : null, [profileScopeReady, resolvedResume, selectedProfile, resumeResolution]);
+  const attachScope = attachTarget ? ptyAttachScope(attachTarget) : "pending";
+  const [attachIdentityState, setAttachIdentity] = useState<PtyAttachIdentity | null>(
+    () => attachTarget ? ptyAttachIdentity(attachTarget) : null,
+  );
+  const attachIdentity = useMemo(() => attachIdentityState?.scope === attachScope
+    ? attachIdentityState
+    : attachTarget ? ptyAttachIdentity(attachTarget) : null,
+  [attachIdentityState, attachScope, attachTarget]);
+  const attachToken = attachIdentity?.attachToken ?? "";
+  const channel = attachIdentity?.channel ?? "";
+  const activePtySessionRef = useRef<{
+    attachToken: string; profile: string; sessionKey: string; lineage: string[];
+  } | null>(null);
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
   // In gated (OAuth) mode the server intentionally omits the session token —
@@ -244,6 +241,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const [bannerAction, setBannerAction] = useState<PtyBannerAction>(() =>
     tokenMissing ? PTY_TOKEN_MISSING_BANNER.action : null,
   );
+  const [terminalRejectionCode, setTerminalRejectionCode] = useState<number | null>(null);
   // True after the automatic reconnect ladder used its last attempt: the
   // overlay then says so and offers "Check server status" alongside Reconnect.
   const [reconnectGaveUp, setReconnectGaveUp] = useState(false);
@@ -302,13 +300,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     mobileReplacementInputUntilRef.current = 0;
     setBanner(null);
     setBannerAction(null);
+    setTerminalRejectionCode(null);
     setReconnectGaveUp(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer]);
   const startFreshPty = useCallback(() => {
+    if (!attachTarget) return;
     forceFreshPtyRef.current = true;
-    setAttachIdentity({ scope: attachScope, token: ptyAttachToken(attachScope, true) });
+    setAttachIdentity(ptyAttachIdentity(attachTarget, true));
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     blockedInputNoticeRef.current = false;
@@ -316,17 +316,19 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     mobileReplacementInputUntilRef.current = 0;
     setBanner(null);
     setBannerAction(null);
+    setTerminalRejectionCode(null);
     setReconnectGaveUp(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [attachScope, clearReconnectTimer]);
+  }, [attachScope, attachTarget, clearReconnectTimer]);
   const startFreshDashboardChat = useCallback(() => {
     const next = new URLSearchParams(searchParams);
 
     next.delete("resume");
     forceFreshPtyRef.current = true;
-    const nextScope = `\0${scopedProfile}`;
-    setAttachIdentity({ scope: nextScope, token: ptyAttachToken(nextScope, true) });
+    setAttachIdentity(ptyAttachIdentity({ profile: selectedProfile, resume: null }, true));
+    setResumeResolution(null);
+    activePtySessionRef.current = null;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     blockedInputNoticeRef.current = false;
@@ -335,10 +337,29 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setSearchParams(next, { replace: true });
     setBanner(null);
     setBannerAction(null);
+    setTerminalRejectionCode(null);
     setReconnectGaveUp(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer, scopedProfile, searchParams, setSearchParams]);
+  }, [clearReconnectTimer, selectedProfile, searchParams, setSearchParams]);
+  const retryRejectedDashboardChat = useCallback(() => {
+    if (!attachIdentity || resolvedResume === undefined) return;
+    if (resolvedResume) {
+      const recovered = ptyRecoverSessionLineage(attachIdentity, {
+        profile: selectedProfile,
+        sessionKey: resolvedResume,
+        lineage: resumeResolution?.confirmed &&
+          resumeResolution.profile === selectedProfile &&
+          resumeResolution.target === resolvedResume
+            ? resumeResolution.path : [resolvedResume],
+      });
+      if (!recovered) return;
+      setAttachIdentity(recovered);
+    } else {
+      setAttachIdentity(ptyAttachIdentity({ profile: selectedProfile, resume: null }, true));
+    }
+    reconnectPty();
+  }, [attachIdentity, reconnectPty, resolvedResume, resumeResolution, selectedProfile]);
   // Clear mobile-input tracking refs when the tab is hidden so stale state
   // from a previous /chat visit doesn't cause the mobile-replacement logic
   // to misfire on the next activation (#106403: repeated last character).
@@ -417,6 +438,66 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     [titleScope],
   );
 
+  const handlePersistentSessionChange = useCallback((rawKey: string) => {
+    const sessionKey = validatedPtySessionKey(rawKey);
+    if (!attachIdentity || !sessionKey) return;
+    const knownLineage = sessionKey === resolvedResume &&
+      resumeResolution?.profile === selectedProfile &&
+      resumeResolution.target === sessionKey
+        ? resumeResolution.path : [sessionKey];
+    const previous = activePtySessionRef.current?.attachToken === attachToken &&
+      activePtySessionRef.current.profile === selectedProfile
+        ? activePtySessionRef.current
+        : resolvedResume ? {
+            attachToken, profile: selectedProfile, sessionKey: resolvedResume,
+            lineage: resumeResolution?.profile === selectedProfile &&
+              resumeResolution.target === resolvedResume
+                ? resumeResolution.path : [resolvedResume],
+          } : null;
+
+    if (!ptyBindSessionIdentity(attachIdentity, {
+      profile: selectedProfile, sessionKey, lineage: knownLineage,
+    })) return;
+    activePtySessionRef.current = {
+      attachToken, profile: selectedProfile, sessionKey, lineage: [...knownLineage],
+    };
+
+    // Persist the active key in the URL after binding it to this PTY token.
+    // Selecting that same key later can now reattach instead of spawning a
+    // competing PTY that loses the active-session lease.
+    if (resumeParam !== sessionKey) {
+      setResumeResolution({
+        confirmed: false, profile: selectedProfile,
+        source: sessionKey, target: sessionKey, path: [...knownLineage],
+      });
+      setSearchParams((prior) => {
+        const next = new URLSearchParams(prior);
+        next.set("resume", sessionKey);
+        return next;
+      }, { replace: true });
+    }
+
+    if (!previous || previous.sessionKey === sessionKey) return;
+    // A /new replaces old aliases. Only a confirmed compression descendant
+    // may restore the ancestor's token mapping.
+    void api.getSessionLatestDescendant(previous.sessionKey, scopedProfile)
+      .then((result) => {
+        const current = activePtySessionRef.current;
+        const path = Array.from(new Set([
+          previous.sessionKey, ...(result.path ?? []), result.session_id,
+        ]));
+        if (!current || current.attachToken !== attachToken ||
+            current.profile !== selectedProfile || current.sessionKey !== sessionKey ||
+            result.session_id !== sessionKey) return;
+        const lineage = Array.from(new Set([...previous.lineage, ...path, sessionKey]));
+        if (ptyBindSessionIdentity(attachIdentity, {
+          profile: selectedProfile, sessionKey, lineage,
+        })) current.lineage = lineage;
+      })
+      .catch(() => {});
+  }, [attachIdentity, attachToken, resolvedResume, resumeParam, resumeResolution,
+    scopedProfile, selectedProfile, setSearchParams]);
+
   useEffect(() => {
     if (!isActive) {
       setTitle(null);
@@ -428,12 +509,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [isActive, sessionTitle, setTitle]);
 
   useEffect(() => {
-    if (!resumeParam) return;
+    if (!resolvedResume) return;
 
     let cancelled = false;
 
     api
-      .getSessionDetail(resumeParam, scopedProfile)
+      .getSessionDetail(resolvedResume, scopedProfile)
       .then((session) => {
         if (cancelled) return;
         handleSessionTitleChange(normalizeSessionTitle(session.title));
@@ -445,32 +526,50 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [resumeParam, scopedProfile, handleSessionTitleChange]);
+  }, [resolvedResume, scopedProfile, handleSessionTitleChange]);
 
   useEffect(() => {
-    if (!resumeParam) return;
+    if (!resumeParam || !profileScopeReady) return;
+    if (resumeResolution?.profile === selectedProfile &&
+        (resumeResolution.source === resumeParam ||
+          resumeResolution.target === resumeParam ||
+          resumeResolution.path.includes(resumeParam))) return;
 
     let cancelled = false;
 
     api
       .getSessionLatestDescendant(resumeParam, scopedProfile)
       .then((res) => {
-        if (cancelled || !res.session_id || res.session_id === resumeParam) {
-          return;
+        if (cancelled) return;
+        const canonical = res.session_id || resumeParam;
+        setResumeResolution({
+          confirmed: true,
+          profile: selectedProfile,
+          source: resumeParam,
+          target: canonical,
+          path: Array.from(new Set([resumeParam, ...(res.path ?? []), canonical])),
+        });
+        if (canonical !== resumeParam) {
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            next.set("resume", canonical);
+            return next;
+          }, { replace: true });
         }
-
-        const next = new URLSearchParams(searchParams);
-        next.set("resume", res.session_id);
-        setSearchParams(next, { replace: true });
       })
       .catch(() => {
-        // Best-effort: old servers or missing sessions should not block chat.
+        // Failed lineage lookup still allows the exact requested resume, but
+        // only after it settles so no intermediate PTY is spawned.
+        if (!cancelled) setResumeResolution({
+          confirmed: false, profile: selectedProfile,
+          source: resumeParam, target: resumeParam, path: [resumeParam],
+        });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [resumeParam, scopedProfile, searchParams, setSearchParams]);
+  }, [resumeParam, resumeResolution, profileScopeReady, scopedProfile, selectedProfile, setSearchParams]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -558,7 +657,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // until the chat tab has been activated. Prevents the persistently
     // mounted, hidden ChatPage from opening `/api/pty` on every dashboard
     // page. Sticky, so switching away from /chat keeps the PTY alive.
-    if (!hasActivated || !profileScopeReady) return;
+    if (!hasActivated || !profileScopeReady || !attachIdentity) return;
 
     const host = hostRef.current;
     if (!host) return;
@@ -1248,7 +1347,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     void (async () => {
       if (unmounting) return;
       const params: Record<string, string> = { channel };
-      if (resumeParam) params.resume = resumeParam;
+      if (resolvedResume) params.resume = resolvedResume;
       if (forceFresh) params.fresh = "1";
       // Keep-alive identity: reattach to this tab's living PTY across
       // refresh/transient drops. A forced-fresh start rotates the token so
@@ -1459,6 +1558,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         setBannerAction(rejection.action);
         return;
       }
+      const terminalRejection = ptyTerminalRejection(ev.code);
+      if (terminalRejection) {
+        setTerminalRejectionCode(ev.code);
+        setPtyState("closed");
+        setBanner(terminalRejection);
+        setBannerAction(null);
+        return;
+      }
       if (ev.code === 1011) {
         // The server could not start the chat (node missing, bad profile,
         // too many terminals open) and already printed why in red inside the
@@ -1474,10 +1581,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         term.write(`\r\n\x1b[90m${PTY_SESSION_ENDED_TERMINAL_LINE}\x1b[0m\r\n`);
         setEndedReason("exited");
         setPtyState("ended");
-        return;
-      }
-      if (ev.code === 4409) {
-        setPtyState("closed");
         return;
       }
       if (!ev.wasClean || ev.code === 1001 || ev.code === 1006) {
@@ -1631,9 +1734,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [
     hasActivated,
     profileScopeReady,
+    attachIdentity,
     channel,
     clearReconnectTimer,
     resumeParam,
+    resolvedResume,
     scopedProfile,
     reconnectNonce,
   ]);
@@ -1878,6 +1983,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 channel={channel}
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onPersistentSessionChange={handlePersistentSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
               />
             </div>
@@ -1907,6 +2013,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           {banner && bannerAction === "reload" && (
             <Button size="sm" outlined onClick={() => window.location.reload()}>
               Reload page
+            </Button>
+          )}
+          {terminalRejectionCode === 4422 && (
+            <Button size="sm" outlined onClick={retryRejectedDashboardChat}>
+              Resume in a new task
             </Button>
           )}
         </div>
@@ -2085,6 +2196,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 channel={channel}
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onPersistentSessionChange={handlePersistentSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
               />
             </div>

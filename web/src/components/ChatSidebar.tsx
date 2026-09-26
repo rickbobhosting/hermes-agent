@@ -49,6 +49,7 @@ import {
 } from '@/lib/events-reconnect'
 import { credentialWarning, sidecarErrorMessage } from '@/lib/chat-sidebar-banner'
 import { titleFromSessionInfoPayload } from '@/lib/chat-title'
+import { ptyActiveSessionKeyFromEvent } from '@/lib/pty-attach'
 
 import { cn } from '@/lib/utils'
 import { AlertCircle, ChevronDown, KeyRound, RefreshCw } from 'lucide-react'
@@ -86,6 +87,7 @@ interface ChatSidebarProps {
   className?: string
   onDashboardNewSessionRequest?: () => void
   onSessionTitleChange?: (title: string | null) => void
+  onPersistentSessionChange?: (sessionKey: string) => void
 }
 
 /** Build the ``session.create`` params for the sidecar session.
@@ -108,7 +110,8 @@ export function ChatSidebar({
   profile,
   className,
   onDashboardNewSessionRequest,
-  onSessionTitleChange
+  onSessionTitleChange,
+  onPersistentSessionChange
 }: ChatSidebarProps) {
   const navigate = useNavigate()
   // `version` bumps on reconnect (manual button, profile/channel switch) and
@@ -331,6 +334,10 @@ export function ChatSidebar({
         onSessionTitleChange?.(title)
       }
     })
+    const offActiveSession = feed.on('dashboard.active_session_changed', ev => {
+      const key = ptyActiveSessionKeyFromEvent(ev.type, ev.payload)
+      if (key) onPersistentSessionChange?.(key)
+    })
     const offNewSession = feed.on('dashboard.new_session_requested', () => {
       onDashboardNewSessionRequest?.()
     })
@@ -346,10 +353,11 @@ export function ChatSidebar({
       offClose()
       offState()
       offSessionInfo()
+      offActiveSession()
       offNewSession()
       feed.close()
     }
-  }, [channel, feed, onDashboardNewSessionRequest, onSessionTitleChange, version])
+  }, [channel, feed, onDashboardNewSessionRequest, onPersistentSessionChange, onSessionTitleChange, version])
 
   // Seed the badge on mount and re-read it whenever the sockets are rebuilt
   // (a profile/channel switch bumps `version`).

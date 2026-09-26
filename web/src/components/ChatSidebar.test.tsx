@@ -169,6 +169,26 @@ afterEach(async () => {
 })
 
 describe('ChatSidebar event socket', () => {
+  it('forwards only validated foreground session keys', async () => {
+    const { ChatSidebar } = await import('./ChatSidebar')
+    const onPersistentSessionChange = vi.fn()
+    await render(<ChatSidebar channel="chat-1" onPersistentSessionChange={onPersistentSessionChange} />)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]
+    await act(async () => {
+      socket.emit('open', {})
+      for (const sessionKey of ['saved-1', 'bad\x1fkey']) {
+        socket.emit('message', { data: JSON.stringify({
+          jsonrpc: '2.0', method: 'event', params: {
+            type: 'dashboard.active_session_changed',
+            payload: { session_key: sessionKey }
+          }
+        }) })
+      }
+    })
+    expect(onPersistentSessionChange).toHaveBeenCalledExactlyOnceWith('saved-1')
+  })
+
   it('routes loopback 4401 closes through stale-token recovery', async () => {
     const { ChatSidebar } = await import('./ChatSidebar')
 

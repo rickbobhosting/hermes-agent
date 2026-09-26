@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -83,8 +83,13 @@ class FakeTerminal {
 }
 
 const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
+const sidebarEvents = vi.hoisted(() => ({
+  onPersistentSessionChange: null as null | ((sessionKey: string) => void),
+}));
 const apiMocks = vi.hoisted(() => ({
-  buildWsUrl: vi.fn(async () => "ws://localhost/api/pty?channel=chat-1"),
+  buildWsUrl: vi.fn(async (_path: string, _params?: Record<string, string>) => "ws://localhost/api/pty?channel=chat-1"),
+  getSessionLatestDescendant: vi.fn(async (id: string) => ({ session_id: id, path: [id] })),
+  getSessionDetail: vi.fn(async () => ({ title: "Saved chat" })),
 }));
 const uploadChatImage = vi.hoisted(() =>
   vi.fn(async () => ({ path: "/tmp/pasted.png" })),
@@ -101,7 +106,12 @@ vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: FakeWebglAddon }));
 vi.mock("@xterm/xterm", () => ({ Terminal: FakeTerminal }));
 vi.mock("@/components/ChatSidebar", () => ({
-  ChatSidebar: () => null,
+  ChatSidebar: ({ onPersistentSessionChange }: {
+    onPersistentSessionChange?: (sessionKey: string) => void;
+  }) => {
+    sidebarEvents.onPersistentSessionChange = onPersistentSessionChange ?? null;
+    return null;
+  },
 }));
 vi.mock("@/components/ChatSessionList", () => ({
   ChatSessionList: () => null,
@@ -114,7 +124,7 @@ vi.mock("@/contexts/usePageHeader", () => ({
   usePageHeader: () => ({ setEnd: vi.fn(), setTitle: vi.fn() }),
 }));
 vi.mock("@/contexts/useProfileScope", () => ({
-  useProfileScope: () => ({ profile: "" }),
+  useProfileScope: () => ({ profile: "", currentProfile: "default", ready: true }),
 }));
 vi.mock("@/themes", () => ({
   useTheme: () => ({ theme: { terminalBackground: "#000000" } }),
@@ -203,9 +213,14 @@ async function render(ui: ReactNode) {
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
+  sidebarEvents.onPersistentSessionChange = null;
   maybeReloadForLoopbackWsAuthFailure.mockClear();
   apiMocks.buildWsUrl.mockReset();
   apiMocks.buildWsUrl.mockResolvedValue("ws://localhost/api/pty?channel=chat-1");
+  apiMocks.getSessionLatestDescendant.mockReset();
+  apiMocks.getSessionLatestDescendant.mockImplementation(async (id: string) => ({ session_id: id, path: [id] }));
+  apiMocks.getSessionDetail.mockReset();
+  apiMocks.getSessionDetail.mockResolvedValue({ title: "Saved chat" });
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal(
     "ResizeObserver",
@@ -267,6 +282,78 @@ afterEach(async () => {
 });
 
 describe("ChatPage", () => {
+  it("reattaches the live PTY when its saved session is selected", async () => {
+    const { default: ChatPage } = await import("./ChatPage");
+    function Selector() {
+      const navigate = useNavigate();
+      return <>
+        <button onClick={() => navigate("/chat")}>Chat</button>
+        <button onClick={() => navigate("/chat?resume=saved-1")}>Saved chat</button>
+      </>;
+    }
+    await render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Selector />
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    await act(async () => { await Promise.resolve(); });
+    const firstToken = apiMocks.buildWsUrl.mock.calls[0]?.[1]?.attach;
+    expect(firstToken).toMatch(/^[0-9a-f]{32}$/);
+    expect(sidebarEvents.onPersistentSessionChange).toBeTypeOf("function");
+
+    await act(async () => {
+      sidebarEvents.onPersistentSessionChange?.("saved-1");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      (Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Chat"))?.click();
+    });
+    await act(async () => {
+      (Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Saved chat"))?.click();
+      await Promise.resolve();
+    });
+    const attachTokens = apiMocks.buildWsUrl.mock.calls.map((call) => call[1]?.attach);
+    expect(attachTokens.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(attachTokens)).toEqual(new Set([firstToken]));
+  });
+
+  it("waits for descendant resolution and keeps one token through URL rewriting", async () => {
+    let resolveLineage!: (value: { session_id: string; path: string[] }) => void;
+    apiMocks.getSessionLatestDescendant.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLineage = resolve;
+    }));
+    const { default: ChatPage } = await import("./ChatPage");
+    function SelectParent() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate("/chat?resume=parent")}>Parent</button>;
+    }
+    await render(
+      <MemoryRouter initialEntries={["/chat?resume=parent"]}>
+        <SelectParent />
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    expect(apiMocks.buildWsUrl).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveLineage({ session_id: "child", path: ["parent", "child"] });
+      await Promise.resolve();
+    });
+    expect(apiMocks.buildWsUrl).toHaveBeenCalled();
+    const token = apiMocks.buildWsUrl.mock.calls[0]?.[1]?.attach;
+    expect(token).toMatch(/^[0-9a-f]{32}$/);
+
+    await act(async () => {
+      (Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Parent"))?.click();
+      await Promise.resolve();
+    });
+    expect(apiMocks.buildWsUrl.mock.calls.every((call) => call[1]?.attach === token)).toBe(true);
+    expect(apiMocks.getSessionLatestDescendant).toHaveBeenCalledTimes(1);
+  });
+
   it("sends a PTY keepalive frame every 20 seconds while the socket is open", async () => {
     vi.useFakeTimers();
     try {
