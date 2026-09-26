@@ -38,6 +38,7 @@ from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK
 from hermes_cli.web_server_profiles import (
     _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
 )
+from hermes_cli.dashboard_fleet import fleet_profile_dicts, resolve_fleet_target
 from hermes_cli.web_server_sessions import _open_session_db_at_path
 from starlette.concurrency import run_in_threadpool
 from hermes_cli.web_models import (
@@ -655,10 +656,42 @@ def _read_profiles():
     from hermes_cli import profiles as profiles_mod
     try:
         profiles = profiles_mod.list_profiles()
-        return {"profiles": [_profile_to_dict(p) for p in profiles]}
+        local = [_profile_to_dict(p) for p in profiles]
     except Exception:
         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
+        local = _fallback_profile_dicts(profiles_mod)
+    known_homes = {str(Path(item["path"]).resolve()) for item in local if item.get("path")}
+    external = [item for item in fleet_profile_dicts() if item["path"] not in known_homes]
+    return {"profiles": local + external}
+
+
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions")
+def list_fleet_sessions(target_id: str, limit: int = Query(20, ge=0, le=100),
+                        offset: int = Query(0, ge=0)):
+    """Read one registered fleet store without schema repair or auto-archive writes."""
+    from hermes_state import SessionDB
+
+    selector = f"fleet:{target_id}"
+    target = resolve_fleet_target(selector)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Fleet target not found")
+    db_path = target.home / "state.db"
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="Fleet target has no session database")
+    try:
+        db = SessionDB(db_path=db_path, read_only=True)
+        try:
+            rows = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True)
+            total = db.session_count(exclude_children=True)
+        finally:
+            db.close()
+    except Exception as exc:
+        _log.warning("Fleet session read failed for %s: %s", selector, exc)
+        raise HTTPException(status_code=503, detail="Fleet session store unavailable") from exc
+    for row in rows:
+        row["profile"] = selector
+        row["is_default_profile"] = False
+    return {"sessions": rows, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/api/profiles")

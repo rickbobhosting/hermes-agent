@@ -874,7 +874,7 @@ export default function ProfilesPage() {
                   }}
                 >
                   <SelectOption value="">{t.profiles.cloneFromNone}</SelectOption>
-                  {profiles.map((profile) => (
+                  {profiles.filter((profile) => !profile.external).map((profile) => (
                     <SelectOption key={profile.name} value={profile.name}>
                       {profile.name}
                     </SelectOption>
@@ -1096,6 +1096,9 @@ export default function ProfilesPage() {
                             {p.display_name?.trim() ? `${p.display_name.trim()} (${p.name})` : p.name}
                           </span>
 
+                          {p.external && <Badge tone="warning">Inspect only</Badge>}
+                          {p.zone && <Badge tone="outline">{p.zone}</Badge>}
+
                           {active && (
                             <Badge tone="success">{L.activeBadge}</Badge>
                           )}
@@ -1125,7 +1128,7 @@ export default function ProfilesPage() {
                           )}
                         </div>
 
-                        <ProfileActionsMenu
+                        {!p.external && <ProfileActionsMenu
                           isActive={active}
                           isDefault={p.is_default}
                           isEditingDesc={isEditingDesc}
@@ -1160,7 +1163,7 @@ export default function ProfilesPage() {
                             setRenameTo(p.name);
                           }}
                           onSetActive={() => handleSetActive(p.name)}
-                        />
+                        />}
                       </div>
 
                       <div className="flex items-center gap-1.5 text-xs">

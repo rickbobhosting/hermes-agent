@@ -9,6 +9,8 @@ import { useLocation, useSearchParams } from "react-router";
 import { api, setManagementProfile } from "@/lib/api";
 import { ProfileContext } from "@/contexts/profile-context";
 
+const isFleetSelector = (name: string) => name.startsWith("fleet:");
+
 /**
  * Machine-level management-profile scope.
  *
@@ -42,7 +44,10 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   // Initial value comes from the URL (deep link / refresh / unified-launch
   // preselect); afterwards state leads and the URL follows.
   const [profile, setProfileState] = useState(
-    () => searchParams.get("profile") ?? "",
+    () => {
+      const requested = searchParams.get("profile") ?? "";
+      return isFleetSelector(requested) ? "" : requested;
+    },
   );
 
   // Mirror into the api module synchronously on every render where it
@@ -54,6 +59,14 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   // over current state — it's an explicit scope request.
   const urlProfile = searchParams.get("profile");
   useEffect(() => {
+    if (urlProfile !== null && isFleetSelector(urlProfile)) {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("profile");
+        return next;
+      }, { replace: true });
+      return;
+    }
     if (urlProfile !== null && urlProfile !== profile) {
       setManagementProfile(urlProfile);
       setProfileState(urlProfile);
@@ -86,7 +99,9 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       .then(([profilesRes, info]) => {
         if (cancelled) return;
 
-        setProfiles(profilesRes.profiles.map((p) => p.name));
+        // The global selector scopes writes and chat. Fleet targets are shown
+        // on Profiles but never offered as a write target in this candidate.
+        setProfiles(profilesRes.profiles.filter((p) => !p.external).map((p) => p.name));
 
         const current = info.current || "default";
         const active = info.active || "default";
@@ -96,7 +111,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         // sticky active profile so Chat and management pages match what the
         // Profiles page shows as "active" (machine dashboard runs as
         // `current`, usually default).
-        if (urlProfile === null && active !== current) {
+        if (urlProfile === null && active !== current && !isFleetSelector(active)) {
           setManagementProfile(active);
           setProfileState(active);
         }
@@ -111,6 +126,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 
   const setProfile = useCallback(
     (name: string) => {
+      if (isFleetSelector(name)) return;
       setManagementProfile(name);
       setProfileState(name);
       setSearchParams(

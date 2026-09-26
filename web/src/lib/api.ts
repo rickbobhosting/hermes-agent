@@ -2289,6 +2289,12 @@ export interface ProfileInfo {
   distribution_version: string | null;
   distribution_source: string | null;
   has_alias: boolean;
+  /** Explicitly registered profile home outside this dashboard's profile tree. */
+  external?: boolean;
+  /** Effective access in this candidate; external targets are inspect-only. */
+  access?: "inspect" | "manage" | "execute";
+  read_only?: boolean;
+  zone?: string;
 }
 
 export interface ModelsAnalyticsModelEntry {
