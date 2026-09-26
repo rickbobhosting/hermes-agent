@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--server-root", type=Path, required=True)
+    parser.add_argument("--basic-auth", action="store_true")
     parser.add_argument("--profile", default="acceptance")
     args = parser.parse_args()
     home = args.home.resolve(strict=True)
@@ -62,7 +63,15 @@ def main() -> None:
     web_server._GATEWAY_HEALTH_URL = None
     web_server.app.state.bound_host = "127.0.0.1"
     web_server.app.state.bound_port = args.port
-    web_server.app.state.auth_required = False
+    if args.basic_auth:
+        from hermes_cli.dashboard_auth.registry import register_global_provider
+        from plugins.dashboard_auth.basic import BasicAuthProvider, hash_password
+
+        register_global_provider(BasicAuthProvider(
+            username="fixture", password_hash=hash_password("fixture-password"),
+            secret=b"disposable-dashboard-handoff-secret-32",
+        ))
+    web_server.app.state.auth_required = args.basic_auth
     web_server.app.state.trusted_public_hosts = frozenset()
     uvicorn.run(web_server.app, host="127.0.0.1", port=args.port, log_level="error", lifespan="on")
 

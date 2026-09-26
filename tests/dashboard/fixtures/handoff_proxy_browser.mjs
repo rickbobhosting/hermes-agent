@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { chromium, expect } from '@playwright/test';
 
-const [base, chromePath] = process.argv.slice(2);
+const [base, chromePath, authMode] = process.argv.slice(2);
 const browser = await chromium.launch({
   ...(chromePath ? { executablePath: chromePath } : {}),
   headless: true,
@@ -62,12 +62,24 @@ try {
   await oldContext.addInitScript(() => {
     localStorage.setItem('hermes.pty.token.chat', 'fixture-old-attach');
   });
-  const unauthenticated = await oldContext.request.get(`${base}/api/sessions?profile=acceptance`);
+  const noAuthContext = await browser.newContext();
+  const unauthenticated = await noAuthContext.request.get(`${base}/api/sessions?profile=acceptance`);
   assert.equal(unauthenticated.status(), 401);
+  const candidateContext = await browser.newContext();
+  if (authMode === 'basic') {
+    // Pin the login POST to the candidate; a bare non-SPA request defaults to old.
+    await candidateContext.addCookies([{ name: 'hermes-handoff-owner', value: 'candidate', url: base }]);
+    const login = await candidateContext.request.post(`${base}/auth/password-login`, {
+      data: { provider: 'basic', username: 'fixture', password: 'fixture-password' },
+    });
+    assert.equal(login.status(), 200);
+    const minted = await candidateContext.cookies(base);
+    assert.equal(minted.find(c => c.name === 'hermes-handoff-owner')?.value, 'candidate');
+    await oldContext.addCookies(minted.filter(c => c.name !== 'hermes-handoff-owner'));
+  }
   const old = await openSaved(oldContext, 'old', 'old-saved');
   await sendTurn(old, 'old turn one', 2);
 
-  const candidateContext = await browser.newContext();
   const candidate = await openSaved(candidateContext, 'candidate', 'candidate-saved');
   await sendTurn(candidate, 'candidate turn one', 2, true);
 
