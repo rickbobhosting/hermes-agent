@@ -83,12 +83,19 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
 
     from hermes_cli import web_server
     from hermes_cli import web_server_chat
+    from hermes_cli.pty_session import PtySessionRegistry
 
     # Another pytest module may have imported web_server before this test
     # cleared inherited variables. Give this app run its own token regardless
     # of collection/import order; SPA injection reads the server value live.
     monkeypatch.setattr(web_server, "_SESSION_TOKEN", secrets.token_urlsafe(32))
     monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", None)
+    # TestClient lifespans in earlier tests close their module-global PTY
+    # registry permanently. Each disposable server run needs its own fresh
+    # registry, just as a new production process would have.
+    registry = PtySessionRegistry(max_sessions=16, buffer_cap=1024 * 1024, read_timeout=0.2)
+    monkeypatch.setattr(web_server_chat, "PTY_REGISTRY", registry)
+    monkeypatch.setattr(web_server, "PTY_REGISTRY", registry)
 
     def fixture_argv(*, resume=None, sidecar_url=None, profile=None, active_session_file=None):
         assert profile == "acceptance"
