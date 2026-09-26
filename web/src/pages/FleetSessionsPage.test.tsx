@@ -56,12 +56,12 @@ describe("fleet session reader", () => {
     expect(await screen.findAllByText("Review this")).toHaveLength(2);
     expect(screen.getByText("Reviewed")).toBeTruthy();
     expect(apiMocks.getFleetSessionDetail).toHaveBeenCalledWith("infra", "session-1");
-    expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledWith("infra", "session-1", 0);
+    expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledWith("infra", "session-1", 0, 120);
     expect(apiMocks.getFleetSessionTimeline).toHaveBeenCalledWith("infra", "session-1");
     fireEvent.click(screen.getByRole("button", { name: "Jump to prompt: Review this" }));
     expect(await screen.findByText("Focused answer")).toBeTruthy();
     expect(apiMocks.getFleetSessionMessagesAround).toHaveBeenCalledWith("infra", "session-1", 17);
-    fireEvent.click(screen.getByRole("button", { name: "Full transcript" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start of transcript" }));
     expect(await screen.findByText("Reviewed")).toBeTruthy();
     for (const action of ["Delete", "Rename", "Resume", "Import", "Prune"]) {
       expect(screen.queryByRole("button", { name: new RegExp(action, "i") })).toBeNull();
@@ -78,5 +78,35 @@ describe("fleet session reader", () => {
     expect(messages).toHaveLength(501);
     expect(messages.at(-1)?.content).toBe("last");
     await waitFor(() => expect(apiMocks.getFleetSessionMessages.mock.calls.map((call) => call[2])).toEqual([0, 500]));
+  });
+
+  it("loads one transcript page on expansion and only one page per prompt cursor", async () => {
+    let resolveMore!: (value: unknown) => void;
+    const more = new Promise((resolve) => { resolveMore = resolve; });
+    apiMocks.getFleetSessions.mockResolvedValue({ sessions: [session], total: 1 });
+    apiMocks.getFleetSessionDetail.mockResolvedValue(session);
+    apiMocks.getFleetSessionMessages.mockResolvedValue({ messages: [{ role: "user", content: "First page" }] });
+    apiMocks.getFleetSessionTimeline
+      .mockResolvedValueOnce({ entries: [{ row_id: 17, preview: "First prompt", timestamp: 10 }],
+        pagination: { has_more: true, next_cursor: 17 } })
+      .mockReturnValueOnce(more);
+
+    render(<ProfileContext.Provider value={{
+      profile: "fleet:infra", currentProfile: "default", ready: true,
+      profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
+      access: "inspect", canManage: false, canExecute: false, setProfile: vi.fn(),
+    }}><FleetSessionsPage /></ProfileContext.Provider>);
+
+    fireEvent.click(await screen.findByText("Deployment review"));
+    expect(await screen.findByText("First page")).toBeTruthy();
+    expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "More prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "More prompts" }));
+    expect(apiMocks.getFleetSessionTimeline).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getFleetSessionTimeline).toHaveBeenLastCalledWith("infra", "session-1", 17);
+    resolveMore({ entries: [{ row_id: 18, preview: "Second prompt", timestamp: 11 }],
+      pagination: { has_more: false, next_cursor: null } });
+    expect(await screen.findByRole("button", { name: "Jump to prompt: Second prompt" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Jump to prompt: Second prompt" })).toHaveLength(1);
   });
 });

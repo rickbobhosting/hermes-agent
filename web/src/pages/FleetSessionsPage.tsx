@@ -6,6 +6,7 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 const PAGE_SIZE = 20;
+const MESSAGE_PAGE_SIZE = 120;
 
 function targetId(selector: string): string {
   return selector.slice("fleet:".length);
@@ -30,6 +31,7 @@ export default function FleetSessionsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [timeline, setTimeline] = useState<FleetTimelineResponse | null>(null);
   const [activePrompt, setActivePrompt] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -37,6 +39,8 @@ export default function FleetSessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const detailRequest = useRef(0);
   const listRequest = useRef(0);
+  const timelinePageInFlight = useRef<string | null>(null);
+  const messagePageInFlight = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const request = ++listRequest.current;
@@ -67,19 +71,23 @@ export default function FleetSessionsPage() {
     setExpanded(session.id);
     setDetail(null);
     setMessages([]);
+    setHasMoreMessages(false);
     setTimeline(null);
     setActivePrompt(null);
+    timelinePageInFlight.current = null;
+    messagePageInFlight.current = null;
     setDetailLoading(true);
     setError(null);
     try {
-      const [nextDetail, nextMessages, nextTimeline] = await Promise.all([
+      const [nextDetail, firstPage, nextTimeline] = await Promise.all([
         api.getFleetSessionDetail(target, session.id),
-        readFleetTranscript(target, session.id),
+        api.getFleetSessionMessages(target, session.id, 0, MESSAGE_PAGE_SIZE),
         api.getFleetSessionTimeline(target, session.id),
       ]);
       if (request !== detailRequest.current) return;
       setDetail(nextDetail);
-      setMessages(nextMessages);
+      setMessages(firstPage.messages);
+      setHasMoreMessages(firstPage.messages.length === MESSAGE_PAGE_SIZE);
       setTimeline(nextTimeline);
     } catch (cause) {
       if (request !== detailRequest.current) return;
@@ -97,6 +105,7 @@ export default function FleetSessionsPage() {
       const page = await api.getFleetSessionMessagesAround(target, sessionId, rowId);
       if (request !== detailRequest.current) return;
       setMessages(page.messages);
+      setHasMoreMessages(false);
       setActivePrompt(rowId);
     } catch (cause) {
       if (request !== detailRequest.current) return;
@@ -106,14 +115,15 @@ export default function FleetSessionsPage() {
     }
   };
 
-  const showFullTranscript = async (sessionId: string) => {
+  const showTranscriptStart = async (sessionId: string) => {
     const request = ++detailRequest.current;
     setDetailLoading(true);
     setError(null);
     try {
-      const full = await readFleetTranscript(target, sessionId);
+      const firstPage = await api.getFleetSessionMessages(target, sessionId, 0, MESSAGE_PAGE_SIZE);
       if (request !== detailRequest.current) return;
-      setMessages(full);
+      setMessages(firstPage.messages);
+      setHasMoreMessages(firstPage.messages.length === MESSAGE_PAGE_SIZE);
       setActivePrompt(null);
     } catch (cause) {
       if (request !== detailRequest.current) return;
@@ -123,20 +133,50 @@ export default function FleetSessionsPage() {
     }
   };
 
+  const loadMoreMessages = async (sessionId: string) => {
+    const request = detailRequest.current;
+    const offset = messages.length;
+    const key = `${target}\0${sessionId}\0${offset}`;
+    if (messagePageInFlight.current || !hasMoreMessages || activePrompt !== null) return;
+    messagePageInFlight.current = key;
+    setError(null);
+    try {
+      const page = await api.getFleetSessionMessages(target, sessionId, offset, MESSAGE_PAGE_SIZE);
+      if (request !== detailRequest.current) return;
+      setMessages((previous) => [...previous, ...page.messages]);
+      setHasMoreMessages(page.messages.length === MESSAGE_PAGE_SIZE);
+    } catch (cause) {
+      if (request !== detailRequest.current) return;
+      setError(cause instanceof Error ? cause.message : "Unable to load more messages.");
+    } finally {
+      if (messagePageInFlight.current === key) messagePageInFlight.current = null;
+    }
+  };
+
   const loadMorePrompts = async (sessionId: string) => {
     const cursor = timeline?.pagination.next_cursor;
     if (cursor == null) return;
+    const key = `${target}\0${sessionId}\0${cursor}`;
+    if (timelinePageInFlight.current) return;
+    timelinePageInFlight.current = key;
     const request = detailRequest.current;
     setError(null);
     try {
       const next = await api.getFleetSessionTimeline(target, sessionId, cursor);
       if (request !== detailRequest.current) return;
-      setTimeline((previous) => previous ? {
-        ...next, entries: [...previous.entries, ...next.entries],
-      } : next);
+      setTimeline((previous) => {
+        if (!previous) return next;
+        const seen = new Set(previous.entries.map((entry) => entry.row_id));
+        return { ...next, entries: [
+          ...previous.entries,
+          ...next.entries.filter((entry) => !seen.has(entry.row_id)),
+        ] };
+      });
     } catch (cause) {
       if (request !== detailRequest.current) return;
       setError(cause instanceof Error ? cause.message : "Unable to load more prompts.");
+    } finally {
+      if (timelinePageInFlight.current === key) timelinePageInFlight.current = null;
     }
   };
 
@@ -192,7 +232,7 @@ export default function FleetSessionsPage() {
                         >{entry.preview}</button>)}
                       </div>
                       {timeline.pagination.has_more && <Button outlined size="sm" onClick={() => void loadMorePrompts(session.id)}>More prompts</Button>}
-                      {activePrompt !== null && <Button outlined size="sm" onClick={() => void showFullTranscript(session.id)}>Full transcript</Button>}
+                      {activePrompt !== null && <Button outlined size="sm" onClick={() => void showTranscriptStart(session.id)}>Start of transcript</Button>}
                     </div>}
                     {messages.map((message, index) => (
                       <div key={index} className="rounded bg-secondary/30 p-3">
@@ -200,6 +240,7 @@ export default function FleetSessionsPage() {
                         <pre className="whitespace-pre-wrap break-words font-sans text-sm">{message.content || ""}</pre>
                       </div>
                     ))}
+                    {activePrompt === null && hasMoreMessages && <Button outlined size="sm" onClick={() => void loadMoreMessages(session.id)}>More messages</Button>}
                   </>}
                 </div>
               )}

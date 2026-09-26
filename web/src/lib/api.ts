@@ -420,9 +420,9 @@ export const api = {
     fetchJSON<SessionInfo>(
       `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}`,
     ),
-  getFleetSessionMessages: (targetId: string, id: string, offset = 0) =>
+  getFleetSessionMessages: (targetId: string, id: string, offset = 0, limit = 500) =>
     fetchJSON<SessionMessagesResponse>(
-      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages?limit=500&offset=${offset}&order=oldest`,
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages?limit=${limit}&offset=${offset}&order=oldest`,
     ),
   getFleetSessionTimeline: (targetId: string, id: string, afterRowId = 0) =>
     fetchJSON<FleetTimelineResponse>(
