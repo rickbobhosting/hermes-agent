@@ -232,8 +232,9 @@ async def _lifespan(app: "FastAPI"):
 
     # Retained PTYs stay alive through browser absence; only exited children
     # and their per-channel breadcrumbs are reaped here.
-    from hermes_cli.web_routers.chat_ws import reap_pty_artifacts
+    from hermes_cli.web_routers.chat_ws import reap_pty_artifacts, reap_revoked_fleet_ptys
     pty_reaper_task = asyncio.create_task(reap_pty_artifacts(app))
+    fleet_pty_reaper_task = asyncio.create_task(reap_revoked_fleet_ptys(app))
     # Periodic authenticated self-test feeding the ``dashboard`` component on /api/status.
     selftest_task = asyncio.create_task(_dashboard_selftest_loop())
     # Live auto-archive timer, independent of list requests.
@@ -271,6 +272,7 @@ async def _lifespan(app: "FastAPI"):
         if cron_stop is not None:
             cron_stop.set()
         pty_reaper_task.cancel()
+        fleet_pty_reaper_task.cancel()
         selftest_task.cancel()
         auto_archive_task.cancel()
         await PTY_REGISTRY.close_all()

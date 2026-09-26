@@ -218,6 +218,43 @@ async def reap_pty_artifacts(app: FastAPI, *, interval: float = 60.0) -> None:
             _log.exception("PTY artifact cleanup failed")
 
 
+async def reap_revoked_fleet_ptys_once(app: FastAPI) -> None:
+    """Stop retained fleet children whose original home no longer has execute access.
+
+    A detached PTY has no WebSocket through which to notice grant revocation.
+    The registration/home check is repeated against the same metadata used for
+    attachment, and only the exact matching retained process is stopped.
+    """
+    registry = _pty_registry()
+    for snapshot in await registry.snapshots():
+        metadata = snapshot.get("metadata") or {}
+        if not isinstance(metadata.get("profile"), str) or not metadata["profile"].startswith("fleet:"):
+            continue
+        try:
+            allowed = _fleet_pty_access(metadata, "execute")
+        except HTTPException:
+            allowed = False
+        if allowed:
+            continue
+        await _stop_revoked_fleet_pty(app, snapshot["id"], metadata)
+
+
+async def _stop_revoked_fleet_pty(app: FastAPI, session_id: str, metadata: dict) -> None:
+    if await _pty_registry().stop(session_id):
+        channel = metadata.get("channel")
+        if isinstance(channel, str):
+            await _forget_pty_channel(app, channel)
+
+
+async def reap_revoked_fleet_ptys(app: FastAPI, *, interval: float = 1.0) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await reap_revoked_fleet_ptys_once(app)
+        except Exception:
+            _log.exception("Fleet PTY grant cleanup failed")
+
+
 def _pty_registry():
     from hermes_cli.web_server_chat import PTY_REGISTRY
     return PTY_REGISTRY
@@ -243,11 +280,18 @@ async def stop_retained_pty_session(session_id: str, request: Request):
     selected = next((s for s in await registry.snapshots() if s["id"] == session_id), None)
     if selected is None:
         raise HTTPException(status_code=404, detail="Dashboard task not found.")
-    if not _fleet_pty_access(selected.get("metadata") or {}, "execute"):
-        raise HTTPException(status_code=403, detail="Fleet target registration changed.")
+    metadata = selected.get("metadata") or {}
+    profile = metadata.get("profile")
+    # Stopping an already-owned process is a cleanup operation even after its
+    # grant is revoked or registration removed. Bind that cleanup to the exact
+    # original selector plus the opaque session ID; a sibling selector cannot
+    # stop it. Local PTY callers keep their existing endpoint contract.
+    if isinstance(profile, str) and profile.startswith("fleet:"):
+        if request.query_params.get("profile") != profile:
+            raise HTTPException(status_code=403, detail="Fleet task selector mismatch.")
     if not await registry.stop(session_id):
         raise HTTPException(status_code=404, detail="Dashboard task not found.")
-    channel = (selected.get("metadata") or {}).get("channel")
+    channel = metadata.get("channel")
     if isinstance(channel, str):
         await _forget_pty_channel(request.app, channel)
     return {"ok": True, "id": session_id}
@@ -630,6 +674,9 @@ async def pty_ws(ws: WebSocket) -> None:
     except HTTPException as exc:
         await _pty_fail(ws, exc)
         return
+    if fleet_target and attach_token is None:
+        await _pty_fail(ws, ValueError("Fleet chat requires a retained attachment token."))
+        return
     profile_scope = f"{canonical_profile}\0{fleet_target.home}" if fleet_target else canonical_profile
     # Legacy caller-supplied channels are global names. An external chat without
     # a retained token gets no breadcrumb or sidecar channel to collide with a
@@ -732,6 +779,17 @@ async def pty_ws(ws: WebSocket) -> None:
     except BaseException:
         await release_claim()
         raise
+    if fleet_target:
+        try:
+            allowed = _fleet_pty_access(metadata, "execute")
+        except HTTPException:
+            allowed = False
+        if not allowed:
+            await _stop_revoked_fleet_pty(ws.app, session.id, metadata)
+            with contextlib.suppress(Exception):
+                await ws.close(code=4403, reason="fleet_access_revoked")
+            await release_claim()
+            return
     if not created:
         # The stored metadata follows the latest canonical resume target.
         session.metadata.update(metadata)
@@ -749,6 +807,16 @@ async def pty_ws(ws: WebSocket) -> None:
                 break
             if message.get("type") == "websocket.disconnect":
                 break
+            if fleet_target:
+                try:
+                    allowed = _fleet_pty_access(session.metadata, "execute")
+                except HTTPException:
+                    allowed = False
+                if not allowed:
+                    await _stop_revoked_fleet_pty(ws.app, session.id, session.metadata)
+                    with contextlib.suppress(Exception):
+                        await ws.close(code=4403, reason="fleet_access_revoked")
+                    break
             raw = message.get("bytes")
             if raw is None:
                 text = message.get("text")

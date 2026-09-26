@@ -75,6 +75,13 @@ async def dashboard_fleet_access_middleware(request: Request, call_next):
         return JSONResponse(status_code=400, content={"detail": "Conflicting profile selectors are not allowed."})
     selector = selectors[0] if selectors else None
     if is_fleet_selector(selector):
+        parts = request.url.path.split("/")
+        if (request.method.upper() == "DELETE" and len(parts) == 5
+                and parts[1:4] == ["api", "pty", "sessions"]):
+            # The route binds this cleanup-only stop to an existing opaque
+            # task ID and its original selector. A revoked registration must
+            # not prevent termination of its already-running child.
+            return await call_next(request)
         try:
             required = _required_access(request)
             if required is None:

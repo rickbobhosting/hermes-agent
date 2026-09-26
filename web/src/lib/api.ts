@@ -361,9 +361,9 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getRetainedPtySessions: () =>
     fetchJSON<RetainedPtySessionsResponse>("/api/pty/sessions"),
-  stopRetainedPtySession: (id: string) =>
+  stopRetainedPtySession: (id: string, profile?: string) =>
     fetchJSON<{ ok: boolean }>(
-      `/api/pty/sessions/${encodeURIComponent(id)}`,
+      `/api/pty/sessions/${encodeURIComponent(id)}${profile?.startsWith("fleet:") ? `?profile=${encodeURIComponent(profile)}` : ""}`,
       { method: "DELETE" },
     ),
   /**

@@ -71,7 +71,7 @@ export function RetainedPtyTasks({ className }: { className?: string }) {
     if (!pendingStop) return;
     setStopping(true);
     try {
-      await api.stopRetainedPtySession(pendingStop.id);
+      await api.stopRetainedPtySession(pendingStop.id, pendingStop.metadata.profile ?? undefined);
       setPendingStop(null);
       await load();
     } catch {

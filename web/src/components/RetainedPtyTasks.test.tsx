@@ -68,7 +68,7 @@ describe("RetainedPtyTasks", () => {
     expect(stop).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
-    await waitFor(() => expect(stop).toHaveBeenCalledWith("public-management-id"));
+    await waitFor(() => expect(stop).toHaveBeenCalledWith("public-management-id", "default"));
     await waitFor(() => expect(getSessions).toHaveBeenCalledTimes(2));
   });
 });
