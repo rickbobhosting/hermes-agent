@@ -412,6 +412,18 @@ export const api = {
       ),
     );
   },
+  getFleetSessions: (targetId: string, limit = 20, offset = 0) =>
+    fetchJSON<PaginatedSessions>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions?limit=${limit}&offset=${offset}`,
+    ),
+  getFleetSessionDetail: (targetId: string, id: string) =>
+    fetchJSON<SessionInfo>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}`,
+    ),
+  getFleetSessionMessages: (targetId: string, id: string, offset = 0) =>
+    fetchJSON<SessionMessagesResponse>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages?limit=500&offset=${offset}&order=oldest`,
+    ),
   getSessionMessages: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionMessagesResponse>(
       appendProfileParam(

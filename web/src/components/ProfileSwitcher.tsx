@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
  * fetchJSON ?profile= injection. Hidden when only one profile exists.
  */
 export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
-  const { profile, currentProfile, profiles, setProfile } = useProfileScope();
+  const { profile, currentProfile, profiles, targets, setProfile } = useProfileScope();
   const { t } = useI18n();
 
   const currentDashboardLabel = useMemo(
@@ -32,7 +32,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
 
   const managed = profile || currentProfile || "default";
   const isOther = !!profile && profile !== currentProfile;
-  const managingLabel = t.app.managingProfile ?? "Managing profile";
+  const managingLabel = profile.startsWith("fleet:") ? "Inspecting fleet target" : (t.app.managingProfile ?? "Managing profile");
 
   return (
     <div
@@ -68,11 +68,14 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
 
         {profiles
           .filter((name) => name !== currentProfile)
-          .map((name) => (
-            <SelectOption key={name} value={name}>
-              {name}
-            </SelectOption>
-          ))}
+          .map((name) => {
+            const target = targets.find((item) => item.name === name);
+            return <SelectOption key={name} value={name}>
+              {target?.display_name || name}
+              {target?.zone ? ` · ${target.zone}` : ""}
+              {target?.external ? " (inspect)" : ""}
+            </SelectOption>;
+          })}
       </Select>
 
       {collapsed && <span className="sr-only">{managed}</span>}

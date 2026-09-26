@@ -199,4 +199,21 @@ describe("api OAuth helpers", () => {
       "/api/providers/oauth/sessions/oauth-session?profile=worker",
     ]);
   });
+
+  it("reads fleet sessions through explicit target paths without a host profile suffix", async () => {
+    const fetchMock = jsonFetchMock({ sessions: [], messages: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("fleet:other");
+
+    await api.getFleetSessions("infra", 20, 40);
+    await api.getFleetSessionDetail("infra", "id/one");
+    await api.getFleetSessionMessages("infra", "id/one", 500);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/profiles/fleet/infra/sessions?limit=20&offset=40",
+      "/api/profiles/fleet/infra/sessions/id%2Fone",
+      "/api/profiles/fleet/infra/sessions/id%2Fone/messages?limit=500&offset=500&order=oldest",
+    ]);
+    expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit).method === undefined)).toBe(true);
+  });
 });

@@ -2,11 +2,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useLocation, useSearchParams } from "react-router";
-import { api, setManagementProfile } from "@/lib/api";
+import { api, setManagementProfile, type ProfileInfo } from "@/lib/api";
 import { ProfileContext } from "@/contexts/profile-context";
 
 const isFleetSelector = (name: string) => name.startsWith("fleet:");
@@ -39,15 +40,17 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { pathname } = useLocation();
   const [profiles, setProfiles] = useState<string[]>([]);
+  const [targets, setTargets] = useState<ProfileInfo[]>([]);
   const [currentProfile, setCurrentProfile] = useState("default");
   const [ready, setReady] = useState(false);
+  const selectionVersion = useRef(0);
 
   // Initial value comes from the URL (deep link / refresh / unified-launch
   // preselect); afterwards state leads and the URL follows.
   const [profile, setProfileState] = useState(
     () => {
       const requested = searchParams.get("profile") ?? "";
-      return isFleetSelector(requested) ? "" : requested;
+      return requested;
     },
   );
 
@@ -60,15 +63,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   // over current state — it's an explicit scope request.
   const urlProfile = searchParams.get("profile");
   useEffect(() => {
-    if (urlProfile !== null && isFleetSelector(urlProfile)) {
-      setSearchParams((prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete("profile");
-        return next;
-      }, { replace: true });
-      return;
-    }
     if (urlProfile !== null && urlProfile !== profile) {
+      selectionVersion.current += 1;
       setManagementProfile(urlProfile);
       setProfileState(urlProfile);
     }
@@ -95,14 +91,14 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     const urlProfile = searchParams.get("profile");
+    const initialSelectionVersion = selectionVersion.current;
 
     Promise.all([api.getProfiles(), api.getActiveProfile()])
       .then(([profilesRes, info]) => {
         if (cancelled) return;
 
-        // The global selector scopes writes and chat. Fleet targets are shown
-        // on Profiles but never offered as a write target in this candidate.
-        setProfiles(profilesRes.profiles.filter((p) => !p.external).map((p) => p.name));
+        setTargets(profilesRes.profiles);
+        setProfiles(profilesRes.profiles.map((p) => p.name));
 
         const current = info.current || "default";
         const active = info.active || "default";
@@ -112,7 +108,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         // sticky active profile so Chat and management pages match what the
         // Profiles page shows as "active" (machine dashboard runs as
         // `current`, usually default).
-        if (urlProfile === null && active !== current && !isFleetSelector(active)) {
+        if (urlProfile === null && selectionVersion.current === initialSelectionVersion && active !== current && !isFleetSelector(active)) {
           setManagementProfile(active);
           setProfileState(active);
         }
@@ -130,7 +126,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 
   const setProfile = useCallback(
     (name: string) => {
-      if (isFleetSelector(name)) return;
+      if (isFleetSelector(name) && !targets.some((target) => target.name === name && target.external)) return;
+      selectionVersion.current += 1;
       setManagementProfile(name);
       setProfileState(name);
       setSearchParams(
@@ -143,12 +140,19 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         { replace: true },
       );
     },
-    [setSearchParams],
+    [setSearchParams, targets],
   );
 
+  const selectedTarget = targets.find((target) => target.name === profile);
+  // The merged backend exposes external homes for inspection only. Keep the
+  // effective UI capability fail-closed even if a future/older record advertises
+  // a stronger value without a matching execute or manage route here.
+  const access = isFleetSelector(profile) ? "inspect" as const : "execute" as const;
+  const canManage = access !== "inspect";
+  const canExecute = access === "execute";
   const value = useMemo(
-    () => ({ profile, currentProfile, ready, profiles, setProfile }),
-    [profile, currentProfile, ready, profiles, setProfile],
+    () => ({ profile, currentProfile, ready, profiles, targets, selectedTarget, access, canManage, canExecute, setProfile }),
+    [profile, currentProfile, ready, profiles, targets, selectedTarget, access, canManage, canExecute, setProfile],
   );
 
   return (

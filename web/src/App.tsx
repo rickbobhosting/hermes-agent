@@ -73,6 +73,7 @@ import { ProfileProvider } from "@/contexts/ProfileProvider";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
+import { fleetRouteAllowed, fleetSelectionBlocked } from "@/lib/fleet-route";
 import { MemoryPressureBanner } from "@/components/MemoryPressureBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
@@ -83,6 +84,7 @@ const DocsPage = lazy(() => import("@/pages/DocsPage"));
 const EnvPage = lazy(() => import("@/pages/EnvPage"));
 const FilesPage = lazy(() => import("@/pages/FilesPage"));
 const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
+const FleetSessionsPage = lazy(() => import("@/pages/FleetSessionsPage"));
 const LogsPage = lazy(() => import("@/pages/LogsPage"));
 const KanbanPage = lazy(() => import("@/pages/KanbanPage"));
 const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
@@ -704,12 +706,14 @@ export default function App() {
               )}
             </nav>
 
-            <SidebarSystemActions
-              collapsed={isDesktopCollapsed}
-              onNavigate={closeMobile}
-              status={sidebarStatus}
-              tooltipWarmRef={tooltipWarmRef}
-            />
+            <FleetLocalOnly>
+              <SidebarSystemActions
+                collapsed={isDesktopCollapsed}
+                onNavigate={closeMobile}
+                status={sidebarStatus}
+                tooltipWarmRef={tooltipWarmRef}
+              />
+            </FleetLocalOnly>
 
             <div
               className={cn(
@@ -783,7 +787,7 @@ export default function App() {
                   <Suspense fallback={<RouteFallback />}>
                     <Routes>
                       {routes.map(({ key, path, element }) => (
-                        <Route key={key} path={path} element={element} />
+                        <Route key={key} path={path} element={<FleetRouteGuard path={path}>{element}</FleetRouteGuard>} />
                       ))}
                       <Route
                         path="*"
@@ -795,7 +799,7 @@ export default function App() {
                   </Suspense>
                 </ProfileKeyedRoutes>
 
-                {embeddedChat &&
+                <FleetLocalOnly>{embeddedChat &&
                   !chatOverriddenByPlugin &&
                   (pluginsLoading ? (
                     isChatRoute ? (
@@ -817,12 +821,12 @@ export default function App() {
                           ) : null
                         }
                       >
-                        <ChatPage isActive={isChatRoute} />
+                        <FleetLocalOnly><ChatPage isActive={isChatRoute} /></FleetLocalOnly>
                       </Suspense>
                     </div>
                   ) : isChatRoute ? (
                     <RouteFallback label="Loading chat…" />
-                  ) : null)}
+                  ) : null)}</FleetLocalOnly>
               </div>
               <PluginSlot name="post-main" />
             </div>
@@ -851,6 +855,21 @@ function ProfileKeyedRoutes({ children }: { children: ReactNode }) {
   return <div key={profile || "__own__"} className="contents">{children}</div>;
 }
 
+function FleetLocalOnly({ children }: { children: ReactNode }) {
+  const { profile } = useProfileScope();
+  return profile.startsWith("fleet:") ? null : children;
+}
+
+function FleetRouteGuard({ children, path }: { children: ReactNode; path: string }) {
+  const { profile, selectedTarget } = useProfileScope();
+  if (!profile.startsWith("fleet:")) return children;
+  if (fleetSelectionBlocked(profile, selectedTarget)) {
+    return <div role="alert" className="p-6 text-sm text-warning">Fleet target unavailable. Choose a registered target.</div>;
+  }
+  if (fleetRouteAllowed(path)) return <FleetSessionsPage />;
+  return <div role="alert" className="p-6 text-sm text-warning">This page has no external fleet scope. Select this dashboard to use it.</div>;
+}
+
 function SidebarNavLink({
   closeMobile,
   collapsed,
@@ -859,6 +878,7 @@ function SidebarNavLink({
   t,
 }: SidebarNavLinkProps) {
   const { path, label, labelKey, icon: Icon } = item;
+  const { profile } = useProfileScope();
   const [hovered, setHovered] = useState(false);
   const [tooltipAnchor, setTooltipAnchor] = useState<HTMLElement | null>(null);
 
@@ -873,6 +893,8 @@ function SidebarNavLink({
     setHovered(false);
     setTooltipAnchor(null);
   };
+
+  if (profile.startsWith("fleet:") && !fleetRouteAllowed(path)) return null;
 
   return (
     <li

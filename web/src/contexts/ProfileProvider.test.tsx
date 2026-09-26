@@ -19,12 +19,14 @@ vi.mock("@/lib/api", () => ({
 import { ProfileProvider } from "./ProfileProvider";
 
 function ScopeState() {
-  const { profile, currentProfile, ready } = useProfileScope();
+  const { profile, currentProfile, ready, access, selectedTarget } = useProfileScope();
   return (
     <div>
       <span data-testid="ready">{String(ready)}</span>
       <span data-testid="profile">{profile || "unset"}</span>
       <span data-testid="current">{currentProfile}</span>
+      <span data-testid="access">{access}</span>
+      <span data-testid="selected">{selectedTarget?.name || "unresolved"}</span>
     </div>
   );
 }
@@ -91,5 +93,26 @@ describe("ProfileProvider readiness", () => {
       expect(screen.getByTestId("ready").textContent).toBe("true"),
     );
     expect(screen.getByTestId("current").textContent).toBe("default");
+  });
+
+  it("keeps an external deep link in inspect mode before and after registry resolution", async () => {
+    const profiles = deferred<{ profiles: { name: string; external?: boolean; access?: string }[] }>();
+    apiMocks.getProfiles.mockReturnValue(profiles.promise);
+    apiMocks.getActiveProfile.mockResolvedValue({ current: "default", active: "default" });
+
+    render(<MemoryRouter initialEntries={["/sessions?profile=fleet%3Ainfra"]}>
+      <ProfileProvider><ScopeState /></ProfileProvider>
+    </MemoryRouter>);
+
+    expect(screen.getByTestId("profile").textContent).toBe("fleet:infra");
+    expect(screen.getByTestId("access").textContent).toBe("inspect");
+    expect(screen.getByTestId("selected").textContent).toBe("unresolved");
+
+    profiles.resolve({ profiles: [
+      { name: "default" },
+      { name: "fleet:infra", external: true, access: "execute" },
+    ] });
+    await waitFor(() => expect(screen.getByTestId("selected").textContent).toBe("fleet:infra"));
+    expect(screen.getByTestId("access").textContent).toBe("inspect");
   });
 });

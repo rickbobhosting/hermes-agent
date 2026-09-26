@@ -8,19 +8,23 @@ import { useI18n } from "@/i18n";
  * skills, MCPs, model) and new Chat sessions land in that profile.
  */
 export function ProfileScopeBanner() {
-  const { profile, currentProfile } = useProfileScope();
+  const { profile, currentProfile, selectedTarget } = useProfileScope();
   const { t } = useI18n();
 
   if (!profile || profile === currentProfile) return null;
+
+  const message = profile.startsWith("fleet:")
+    ? `Inspecting “${selectedTarget.display_name || profile}” — changes and interactive execution are unavailable.`
+    : (
+        t.app.managingProfileBanner ??
+        "Managing profile “{name}” — config, keys, skills, MCPs, model, and new chats apply to that profile."
+      ).replace("{name}", profile);
 
   return (
     <div className="flex items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-1.5 text-xs text-amber-300">
       <Users className="h-3.5 w-3.5 shrink-0" />
       <span>
-        {(
-          t.app.managingProfileBanner ??
-          "Managing profile “{name}” — config, keys, skills, MCPs, model, and new chats apply to that profile."
-        ).replace("{name}", profile)}
+        {message}
       </span>
     </div>
   );
