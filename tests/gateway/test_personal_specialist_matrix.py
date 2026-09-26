@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from io import BytesIO
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -146,6 +148,51 @@ async def test_replayed_matrix_event_submits_once_via_durable_key(monkeypatch):
     assert (await client.run(**args))["result"]["text"] == "Done."
     assert (await client.run(**args))["result"]["text"] == "Done."
     assert calls == ["GET", "POST", "GET"]
+
+
+@pytest.mark.asyncio
+async def test_client_waits_for_real_api_pending_status(monkeypatch):
+    client = InvocationClient(lambda: "test-bearer")
+    calls = []
+    states = iter(("pending", "running", "succeeded"))
+
+    def request(method, path, body=None):
+        calls.append(method)
+        if len(calls) == 1:
+            return None
+        status = next(states)
+        return {"id": "invoke-id", "profile": "geo", "status": status,
+                "session_id": "actual-session" if status == "succeeded" else None,
+                "result": {"text": "Done."} if status == "succeeded" else None}
+
+    async def no_wait(_seconds):
+        pass
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr("gateway.personal_specialist_matrix.asyncio.sleep", no_wait)
+    result = await client.run(key="matrix-personal:pending", profile="geo",
+                              prompt="map", session_id=None)
+    assert result["status"] == "succeeded"
+    assert calls == ["GET", "POST", "GET", "GET"]
+
+
+def test_client_accepts_valid_maximum_result_with_json_envelope(monkeypatch):
+    client = InvocationClient(lambda: "test-bearer")
+    record = {"id": "invoke-id", "profile": "geo", "status": "succeeded",
+              "session_id": "actual-session", "result": {"text": "x" * (1024 * 1024)}}
+    payload = json.dumps(record).encode()
+    assert len(payload) > 1024 * 1024
+
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr("gateway.personal_specialist_matrix.urllib.request.urlopen",
+                        lambda *_args, **_kwargs: Response(payload))
+    assert client._request("GET", "/v1/invocations/invoke-id") == record
 
 
 def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch):

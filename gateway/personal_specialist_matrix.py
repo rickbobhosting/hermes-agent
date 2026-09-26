@@ -25,6 +25,9 @@ class InvocationUnavailable(Exception):
     """A request could not be resolved to a successful durable invocation."""
 
 
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
 class InvocationClient:
     """Small, fixed-loopback client; bearer and prompts never enter logs or URLs."""
 
@@ -49,14 +52,14 @@ class InvocationClient:
         request = urllib.request.Request(self._base + path, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
-                raw = response.read(1024 * 1024 + 1)
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             if method == "GET" and exc.code == 404:
                 return None
             raise InvocationUnavailable(f"invocation API returned HTTP {exc.code}") from None
         except (OSError, TimeoutError) as exc:
             raise InvocationUnavailable("invocation API is unavailable") from exc
-        if len(raw) > 1024 * 1024:
+        if len(raw) > MAX_RESPONSE_BYTES:
             raise InvocationUnavailable("invocation API response exceeded the limit")
         try:
             record = json.loads(raw)
@@ -86,7 +89,7 @@ class InvocationClient:
         if not isinstance(invocation_id, str) or not invocation_id:
             raise InvocationUnavailable("invocation API returned no invocation ID")
         deadline = time.monotonic() + timeout_seconds + 30
-        while record.get("status") in {"queued", "running"}:
+        while record.get("status") in {"pending", "queued", "running"}:
             if time.monotonic() >= deadline:
                 raise InvocationUnavailable("invocation remains unresolved")
             await asyncio.sleep(1)
