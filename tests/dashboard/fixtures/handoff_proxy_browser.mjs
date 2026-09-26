@@ -11,10 +11,14 @@ const browser = await chromium.launch({
 async function openSaved(context, owner, sessionId) {
   const page = await context.newPage({ viewport: { width: 1440, height: 900 } });
   const frames = [];
+  const allFrames = [];
   page.routeWebSocket('**/api/ws*', socket => socket.close());
   page.on('websocket', socket => {
     if (socket.url().includes('/api/pty?')) {
-      socket.on('framereceived', frame => frames.push(String(frame.payload)));
+      socket.on('framereceived', frame => {
+        frames.push(String(frame.payload));
+        allFrames.push(String(frame.payload));
+      });
     }
   });
   await page.goto(`${base}/sessions`, { waitUntil: 'domcontentloaded' });
@@ -25,13 +29,16 @@ async function openSaved(context, owner, sessionId) {
   await switcher.locator('button').click();
   await switcher.getByRole('option', { name: 'acceptance' }).click();
   await page.getByRole('link', { name: 'Chat', exact: true }).click();
-  await page.getByText(`${owner === 'old' ? 'Old' : 'Candidate'} saved`, { exact: true }).click();
+  const savedTitle = sessionId === 'candidate-other' ? 'Candidate other saved'
+    : `${owner === 'old' ? 'Old' : 'Candidate'} saved`;
+  await page.getByText(savedTitle, { exact: true }).click();
   await expect.poll(() => new URL(page.url()).searchParams.get('resume')).toBe(sessionId);
   const terminal = page.locator('.hermes-chat-xterm-host');
   await expect(terminal.getByRole('textbox', { name: 'Terminal input' })).toBeVisible();
-  await expect.poll(() => frames.join('')).toContain(`${owner} saved answer`);
+  const savedAnswer = sessionId === 'candidate-other' ? 'other saved answer' : `${owner} saved answer`;
+  await expect.poll(() => frames.join('')).toContain(savedAnswer);
   await expect.poll(() => frames.join('')).toContain('fixture ready>');
-  return { page, frames, terminal };
+  return { page, frames, allFrames, terminal };
 }
 
 async function sendTurn(view, text, replyNumber, assertStreaming = false) {
@@ -83,13 +90,29 @@ try {
   const candidate = await openSaved(candidateContext, 'candidate', 'candidate-saved');
   await sendTurn(candidate, 'candidate turn one', 2, true);
 
+  const otherContext = await browser.newContext();
+  await otherContext.addCookies([{ name: 'hermes-handoff-owner', value: 'candidate', url: base }]);
+  if (authMode === 'basic') {
+    const cookies = await candidateContext.cookies(base);
+    await otherContext.addCookies(cookies.filter(c => c.name !== 'hermes-handoff-owner'));
+  }
+  const other = await openSaved(otherContext, 'candidate', 'candidate-other');
+  await sendTurn(other, 'other before cancel', 2);
+
   candidate.frames.length = 0;
   await candidate.terminal.click();
   await candidate.page.keyboard.type('slow fixture turn');
   await candidate.page.keyboard.press('Enter');
   await expect.poll(() => candidate.frames.join('')).toContain('fixture pending');
+  await sendTurn(other, 'other during pending', 3);
   await candidate.page.keyboard.press('Control+C');
   await expect.poll(() => candidate.frames.join('')).toContain('fixture cancelled');
+  await expect.poll(() => candidate.frames.join('')).toContain('fixture ready>');
+  assert.ok(!other.allFrames.join('').includes('fixture cancelled'),
+    'cancelling the first candidate PTY reached the second conversation');
+  await sendTurn(other, 'other after cancel', 4);
+  assert.ok(!other.allFrames.join('').includes('fixture cancelled'),
+    'cancelling the first candidate PTY reached the second conversation');
 
   await sendTurn(old, 'old during candidate', 3);
   old.frames.length = 0;
