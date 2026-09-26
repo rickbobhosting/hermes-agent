@@ -1096,7 +1096,23 @@ class GatewayAdapterLifecycleMixin:
     ) -> None:
         """Install the runner callbacks every adapter needs (defaults = primary handlers;
         secondary wiring passes profile-scoped variants). ``set_reaction_handler`` is optional."""
-        adapter.set_message_handler(message_handler or self._primary_message_handler())
+        selected_handler = message_handler or self._primary_message_handler()
+        # Orchestra's personal umbrella is an exact opt-in on the primary Matrix
+        # account. Secondary work/Qwen adapters retain their existing handlers.
+        if message_handler is None and adapter.platform == Platform.MATRIX and not self._multiplex_on():
+            from gateway.personal_specialist_matrix import build_opt_in_router
+            personal_router = build_opt_in_router(adapter)
+            if personal_router is not None:
+                fallback = selected_handler
+
+                # Text batching merges distinct Matrix event IDs into one prompt;
+                # personal idempotency and session binding require one event each.
+                adapter._text_batch_delay_seconds = 0
+
+                async def selected_handler(event):
+                    return await personal_router.handle(event, fallback)
+
+        adapter.set_message_handler(selected_handler)
         adapter.set_fatal_error_handler(fatal_error_handler or self._handle_adapter_fatal_error)
         adapter.set_session_store(self.session_store)
         adapter.set_busy_session_handler(busy_session_handler or self._primary_busy_session_handler())
