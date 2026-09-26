@@ -183,9 +183,19 @@ def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
         raise ValueError("personal routing Matrix owner does not match this adapter")
     if not get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", ""):
         raise ValueError("personal routing needs Orchestra invocation credential")
+    port_raw = str(get_scoped_secret("HERMES_PERSONAL_INVOCATION_PORT", "8789"))
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise ValueError("personal routing needs a valid loopback invocation port") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("personal routing needs a valid loopback invocation port")
     home = Path(get_hermes_home())
     bindings = BindingStore(home / "state" / "personal-specialist-bindings.sqlite3")
-    client = InvocationClient(lambda: str(get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", "")))
+    client = InvocationClient(
+        lambda: str(get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", "")),
+        port=port,
+    )
     return MatrixPersonalRouter(
         Router(rules, bindings), client, account,
         account_getter=lambda: str(getattr(adapter, "_user_id", "")),

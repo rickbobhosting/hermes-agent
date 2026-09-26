@@ -249,7 +249,14 @@ def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     (tmp_path / "rules.yaml").write_text(
         "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\nroom_defaults: []\nkeywords: {}\n")
-    assert build_opt_in_router(SimpleNamespace(_user_id=ACCOUNT)) is not None
+    adapter = SimpleNamespace(_user_id=ACCOUNT)
+    assert build_opt_in_router(adapter).client._base == "http://127.0.0.1:8789"
+    values["HERMES_PERSONAL_INVOCATION_PORT"] = "18789"
+    assert build_opt_in_router(adapter).client._base == "http://127.0.0.1:18789"
+    values["HERMES_PERSONAL_INVOCATION_PORT"] = "not-a-port"
+    with pytest.raises(ValueError, match="loopback invocation port"):
+        build_opt_in_router(adapter)
+    values["HERMES_PERSONAL_INVOCATION_PORT"] = "8789"
     with pytest.raises(ValueError, match="owner"):
         build_opt_in_router(SimpleNamespace(_user_id="@geo:example.org"))
     values["HERMES_PERSONAL_INVOCATION_TOKEN"] = ""

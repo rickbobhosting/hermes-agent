@@ -10,6 +10,10 @@ receiving Orchestra Matrix account. Missing or mismatched configuration fails
 gateway startup rather than silently dispatching to another bot. The bearer is
 read from the gateway's profile-scoped environment at request time and is
 never included in a URL or log line.
+`HERMES_PERSONAL_INVOCATION_PORT` can select a separately staged loopback
+Invocation API during the phased handoff; it defaults to `8789` and rejects
+non-numeric or out-of-range values. The client bypasses process proxy settings
+and HTTP redirects so its bearer and prompt stay on `127.0.0.1`.
 
 The adapter still owns Matrix authorization, mention/room policy, event dedup,
 threading, and reply delivery. Routing is installed only on a standalone
