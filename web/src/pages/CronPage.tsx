@@ -659,7 +659,7 @@ export default function CronPage() {
   useEffect(() => {
     api
       .getProfiles()
-      .then((res) => setProfiles(res.profiles))
+      .then((res) => setProfiles(res.profiles.filter((profile) => !profile.external)))
       .catch(() => setProfiles([]));
   }, []);
 

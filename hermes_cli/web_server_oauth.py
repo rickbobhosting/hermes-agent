@@ -42,10 +42,11 @@ def _token_status(source: str, source_label: str, creds: Dict[str, Any]) -> Dict
 
 def _anthropic_oauth_status() -> Dict[str, Any]:
     """Status for the "Anthropic API Key" card: Hermes-managed PKCE file first, then the
-    registry-ordered env vars (process env — where Bitwarden-sourced secrets land — then .env).
+    Hermes-owned registry env vars (process env — where Bitwarden-sourced secrets land — then .env).
 
-    Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read here. It is owned by
-    Claude Code, not Hermes; counting it would shadow a real ANTHROPIC_API_KEY.
+    Claude Code's credential file and ``CLAUDE_CODE_OAUTH_TOKEN`` are deliberately
+    ignored here. They are owned by Claude Code, not Hermes; counting either
+    would shadow a real ANTHROPIC_API_KEY.
     """
     try:
         from agent.anthropic_credentials import read_hermes_oauth_credentials, _get_hermes_oauth_file
@@ -55,10 +56,13 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
     if hermes_creds and hermes_creds.get("accessToken"):
         return _token_status("hermes_pkce", f"Hermes PKCE ({_get_hermes_oauth_file()})", hermes_creds)
 
-    env_var_order: tuple = ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    env_var_order: tuple = ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
-        env_var_order = PROVIDER_REGISTRY["anthropic"].api_key_env_vars
+        env_var_order = tuple(
+            var for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars
+            if var != "CLAUDE_CODE_OAUTH_TOKEN"
+        )
     except (ImportError, KeyError):
         pass
     from hermes_cli.config import get_env_value

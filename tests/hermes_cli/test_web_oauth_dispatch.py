@@ -667,6 +667,30 @@ def test_accounts_hides_claude_code_external_credentials():
     assert "claude-code" not in providers
 
 
+def test_anthropic_accounts_status_ignores_claude_code_owned_env_token(tmp_path, monkeypatch):
+    """An implicit Claude Code token cannot make Hermes look logged in."""
+    from agent import anthropic_credentials
+    from hermes_cli import config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "cc-test-sentinel")
+    monkeypatch.setattr(anthropic_credentials, "read_hermes_oauth_credentials", lambda: None)
+    monkeypatch.setattr(config, "get_env_value", lambda _name: None)
+
+    status = _web_server_oauth._anthropic_oauth_status()
+    assert status["logged_in"] is False
+    assert status["source"] is None
+    assert not status.get("token_preview")
+
+    response = client.get("/api/providers/oauth", headers=HEADERS)
+    assert response.status_code == 200
+    account = next(p for p in response.json()["providers"] if p["id"] == "anthropic")
+    assert account["status"]["logged_in"] is False
+    assert not account["status"].get("token_preview")
+
+
 def test_external_oauth_disconnect_rejected_before_auth_mutation(monkeypatch):
     """DELETE must not pretend to remove credentials owned by another CLI."""
     from hermes_cli import auth as auth_mod
@@ -826,6 +850,4 @@ def test_status_falls_through_to_generic_dispatcher_for_catalog_only_provider():
     assert out["token_preview"] and "sk-future-secret-token-xyz" not in out["token_preview"]
     assert out["expires_at"] == "2026-12-01T00:00:00Z"
     assert out["has_refresh_token"] is True
-
-
 
