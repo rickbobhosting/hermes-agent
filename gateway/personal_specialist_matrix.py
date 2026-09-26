@@ -168,26 +168,33 @@ class MatrixPersonalRouter:
 
 
 def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
-    """Fail closed until an exact owner, rules file and bearer are configured."""
+    """Fail closed until versioned Matrix YAML, exact owner and bearer are configured."""
     from gateway.platforms._shared import get_scoped_secret
     from hermes_constants import get_hermes_home
 
-    if str(get_scoped_secret("HERMES_PERSONAL_ROUTING_ENABLED", "")).lower() not in {"1", "true"}:
+    extra = getattr(getattr(adapter, "config", None), "extra", {}) or {}
+    settings = extra.get("personal_routing")
+    if settings is None:
         return None
-    rules_raw = str(get_scoped_secret("HERMES_PERSONAL_ROUTING_RULES", ""))
+    if not isinstance(settings, dict) or type(settings.get("version")) is not int or settings["version"] != 1:
+        raise ValueError("personal routing config requires version 1")
+    enabled = settings.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("personal routing enabled must be a boolean")
+    if not enabled:
+        return None
+    rules_raw = settings.get("rules_path")
     account = str(getattr(adapter, "_user_id", ""))
-    if not rules_raw or not Path(rules_raw).is_absolute() or not account:
+    if not isinstance(rules_raw, str) or not rules_raw or not Path(rules_raw).is_absolute() or not account:
         raise ValueError("personal routing needs absolute rules path and Matrix account")
     rules = Rules.load(Path(rules_raw))
     if rules.owner_accounts.get("matrix") != account:
         raise ValueError("personal routing Matrix owner does not match this adapter")
     if not get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", ""):
         raise ValueError("personal routing needs Orchestra invocation credential")
-    port_raw = str(get_scoped_secret("HERMES_PERSONAL_INVOCATION_PORT", "8789"))
-    try:
-        port = int(port_raw)
-    except ValueError as exc:
-        raise ValueError("personal routing needs a valid loopback invocation port") from exc
+    port = settings.get("invocation_port", 8789)
+    if type(port) is not int:
+        raise ValueError("personal routing needs a valid loopback invocation port")
     if not 1 <= port <= 65535:
         raise ValueError("personal routing needs a valid loopback invocation port")
     home = Path(get_hermes_home())

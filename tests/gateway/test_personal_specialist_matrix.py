@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.personal_specialist_matrix import (
     InvocationClient, InvocationUnavailable, MatrixPersonalRouter, build_opt_in_router, event_key,
 )
@@ -242,26 +242,63 @@ def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch)
     import gateway.platforms._shared as shared
     import hermes_constants
 
-    values = {"HERMES_PERSONAL_ROUTING_ENABLED": "true",
-              "HERMES_PERSONAL_ROUTING_RULES": str(tmp_path / "rules.yaml"),
-              "HERMES_PERSONAL_INVOCATION_TOKEN": "test-only"}
+    values = {"HERMES_PERSONAL_INVOCATION_TOKEN": "test-only"}
     monkeypatch.setattr(shared, "get_scoped_secret", lambda key, default="": values.get(key, default))
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     (tmp_path / "rules.yaml").write_text(
         "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\nroom_defaults: []\nkeywords: {}\n")
-    adapter = SimpleNamespace(_user_id=ACCOUNT)
+    settings = {"version": 1, "enabled": True, "rules_path": str(tmp_path / "rules.yaml")}
+    adapter = SimpleNamespace(_user_id=ACCOUNT, config=PlatformConfig(extra={"personal_routing": settings}))
     assert build_opt_in_router(adapter).client._base == "http://127.0.0.1:8789"
-    values["HERMES_PERSONAL_INVOCATION_PORT"] = "18789"
+    settings["invocation_port"] = 18789
     assert build_opt_in_router(adapter).client._base == "http://127.0.0.1:18789"
-    values["HERMES_PERSONAL_INVOCATION_PORT"] = "not-a-port"
+    settings["invocation_port"] = "not-a-port"
     with pytest.raises(ValueError, match="loopback invocation port"):
         build_opt_in_router(adapter)
-    values["HERMES_PERSONAL_INVOCATION_PORT"] = "8789"
+    settings["invocation_port"] = 8789
     with pytest.raises(ValueError, match="owner"):
-        build_opt_in_router(SimpleNamespace(_user_id="@geo:example.org"))
+        build_opt_in_router(SimpleNamespace(_user_id="@geo:example.org", config=adapter.config))
     values["HERMES_PERSONAL_INVOCATION_TOKEN"] = ""
     with pytest.raises(ValueError, match="credential"):
-        build_opt_in_router(SimpleNamespace(_user_id=ACCOUNT))
+        build_opt_in_router(adapter)
+
+
+def test_personal_routing_requires_versioned_boolean_yaml_and_ignores_old_env(tmp_path, monkeypatch):
+    for name, value in (("HERMES_PERSONAL_ROUTING_ENABLED", "true"),
+                        ("HERMES_PERSONAL_ROUTING_RULES", str(tmp_path / "rules.yaml")),
+                        ("HERMES_PERSONAL_INVOCATION_PORT", "18789")):
+        monkeypatch.setenv(name, value)
+    adapter = SimpleNamespace(_user_id=ACCOUNT, config=PlatformConfig())
+    assert build_opt_in_router(adapter) is None
+    adapter.config.extra["personal_routing"] = {"version": 1, "enabled": False}
+    assert build_opt_in_router(adapter) is None
+    for settings, error in (({"version": 2, "enabled": True}, "version 1"),
+                            ({"version": 1, "enabled": "true"}, "boolean"),
+                            ({"version": 1, "enabled": True, "rules_path": "rules.yaml"}, "absolute rules")):
+        adapter.config.extra["personal_routing"] = settings
+        with pytest.raises(ValueError, match=error):
+            build_opt_in_router(adapter)
+
+
+def test_real_gateway_yaml_loader_keeps_personal_routing_profile_scoped(tmp_path, monkeypatch):
+    homes = [tmp_path / "a", tmp_path / "b"]
+    for home in homes:
+        home.mkdir()
+        (home / "rules.yaml").write_text(
+            "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
+            "room_defaults: []\nkeywords: {}\n")
+    (homes[0] / "config.yaml").write_text(
+        "matrix:\n  personal_routing:\n    version: 1\n    enabled: true\n"
+        f"    rules_path: {homes[0] / 'rules.yaml'}\n    invocation_port: 18789\n")
+    (homes[1] / "config.yaml").write_text(
+        "matrix:\n  personal_routing:\n    version: 1\n    enabled: false\n")
+    monkeypatch.setenv("HERMES_PERSONAL_INVOCATION_TOKEN", "test-only")
+    for home, expected_port in ((homes[0], 18789), (homes[1], None), (homes[0], 18789)):
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        matrix_config = load_gateway_config().platforms[Platform.MATRIX]
+        adapter = SimpleNamespace(_user_id=ACCOUNT, config=matrix_config)
+        router = build_opt_in_router(adapter)
+        assert (int(router.client._base.rsplit(":", 1)[1]) if router else None) == expected_port
 
 
 def test_event_key_is_scoped_and_requires_real_matrix_event_id():
