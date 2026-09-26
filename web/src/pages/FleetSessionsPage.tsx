@@ -4,6 +4,7 @@ import { useProfileScope } from "@/contexts/useProfileScope";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
+import { useNavigate } from "react-router";
 
 const PAGE_SIZE = 20;
 const MESSAGE_PAGE_SIZE = 120;
@@ -23,7 +24,8 @@ export async function readFleetTranscript(target: string, session: string): Prom
 }
 
 export default function FleetSessionsPage() {
-  const { profile, selectedTarget } = useProfileScope();
+  const { profile, selectedTarget, canExecute } = useProfileScope();
+  const navigate = useNavigate();
   const target = targetId(profile);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
@@ -199,11 +201,21 @@ export default function FleetSessionsPage() {
     }
   };
 
+  const openChat = (sessionId?: string) => {
+    if (!canExecute) return;
+    const params = new URLSearchParams({ profile });
+    if (sessionId) params.set("resume", sessionId);
+    navigate(`/chat?${params.toString()}`);
+  };
+
   return (
     <main className="mx-auto w-full max-w-5xl space-y-4 py-5">
       <div>
-        <h1 className="text-xl font-semibold">Fleet sessions · {selectedTarget?.display_name || selectedTarget?.name}</h1>
-        <p className="text-sm text-muted-foreground">Read-only history from the selected external target.</p>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl font-semibold">Fleet sessions · {selectedTarget?.display_name || selectedTarget?.name}</h1>
+          {canExecute && <Button outlined size="sm" onClick={() => openChat()}>New chat</Button>}
+        </div>
+        <p className="text-sm text-muted-foreground">Session history from the selected external target.</p>
       </div>
       {error && <p role="alert" className="text-sm text-warning">{error}</p>}
       {loading ? <Spinner /> : sessions.length === 0 ? <p className="text-sm text-muted-foreground">No sessions found.</p> : (
@@ -215,7 +227,10 @@ export default function FleetSessionsPage() {
                   <span className="block truncate text-sm font-medium">{session.title || session.id}</span>
                   <span className="text-xs text-muted-foreground">{session.source || "local"} · {timeAgo(session.started_at)} · {session.message_count} messages</span>
                 </button>
-                <Button outlined size="sm" onClick={() => void exportSession(session)} aria-label={`Export ${session.title || session.id}`}>Export</Button>
+                <div className="flex shrink-0 gap-2">
+                  {canExecute && <Button outlined size="sm" onClick={() => openChat(session.id)} aria-label={`Resume ${session.title || session.id}`}>Resume</Button>}
+                  <Button outlined size="sm" onClick={() => void exportSession(session)} aria-label={`Export ${session.title || session.id}`}>Export</Button>
+                </div>
               </div>
               {expanded === session.id && (
                 <div className="mt-3 space-y-3 border-t border-border pt-3">

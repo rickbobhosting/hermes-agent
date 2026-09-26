@@ -35,7 +35,8 @@ def _free_loopback_port() -> int:
         return listener.getsockname()[1]
 
 
-def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeypatch, request):
+@pytest.mark.parametrize("fleet", [False, True], ids=["named-profile", "registered-fleet"])
+def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeypatch, request, fleet):
     if sys.platform == "win32":
         pytest.skip("POSIX PTY fixture")
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or ""
@@ -64,15 +65,20 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     monkeypatch.setenv("TMPDIR", str(temp_dir))
     monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
     hermes_home = tmp_path / "hermes-fixture"
-    profile_home = hermes_home / "profiles" / "acceptance"
+    hermes_home.mkdir()
+    profile_home = (tmp_path / "external-infra") if fleet else (hermes_home / "profiles" / "acceptance")
     profile_home.mkdir(parents=True)
     (profile_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    if fleet:
+        import yaml
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump({"dashboard": {"fleet_targets": {
+            "infra": {"home": str(profile_home), "label": "Infra", "access": "execute"},
+        }}}), encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("HERMES_TEST_ISOLATION", str(hermes_home))
     for name in ("CONFIG", "CACHE", "DATA", "STATE"):
         monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
-    hermes_home.mkdir(exist_ok=True)
 
     session_id = "browser-continuity-session"
     with SessionDB(profile_home / "state.db") as db:
@@ -101,7 +107,7 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     monkeypatch.setattr(web_server, "PTY_REGISTRY", registry)
 
     def fixture_argv(*, resume=None, sidecar_url=None, profile=None, active_session_file=None):
-        assert profile == "acceptance"
+        assert profile == ("fleet:infra" if fleet else "acceptance")
         assert resume in (None, session_id)
         child_env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -150,7 +156,8 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
         if os.environ.get("LANG"):
             browser_env["LANG"] = os.environ["LANG"]
         run = subprocess.run(
-            ["node", str(BROWSER), f"http://127.0.0.1:{port}", session_id, chrome],
+            ["node", str(BROWSER), f"http://127.0.0.1:{port}", session_id, chrome,
+             "fleet" if fleet else "named"],
             cwd=ROOT, env=browser_env, capture_output=True,
             text=True, timeout=65, check=False,
         )

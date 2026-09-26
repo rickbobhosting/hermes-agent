@@ -199,9 +199,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [isActive]);
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
-  const { profile: scopedProfile, currentProfile, ready: profileReady } = useProfileScope();
+  const { profile: scopedProfile, currentProfile, ready: profileReady, canExecute } = useProfileScope();
+  const isFleet = scopedProfile.startsWith("fleet:");
+  const fleetTargetId = isFleet ? scopedProfile.slice("fleet:".length) : "";
   const selectedProfile = (scopedProfile || currentProfile || "default").trim().toLowerCase();
-  const profileScopeReady = Boolean(scopedProfile.trim()) || profileReady;
+  const profileScopeReady = (Boolean(scopedProfile.trim()) || profileReady) && (!isFleet || canExecute);
   const [resumeResolution, setResumeResolution] = useState<PtyResumeResolution | null>(null);
   const resolvedResume = resolvedPtyResume(resumeParam, selectedProfile, resumeResolution);
   const attachTarget = useMemo(() => profileScopeReady && resolvedResume !== undefined
@@ -480,7 +482,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     if (!previous || previous.sessionKey === sessionKey) return;
     // A /new replaces old aliases. Only a confirmed compression descendant
     // may restore the ancestor's token mapping.
-    void api.getSessionLatestDescendant(previous.sessionKey, scopedProfile)
+    void (isFleet
+      ? api.getFleetSessionLatestDescendant(fleetTargetId, previous.sessionKey)
+      : api.getSessionLatestDescendant(previous.sessionKey, scopedProfile))
       .then((result) => {
         const current = activePtySessionRef.current;
         const path = Array.from(new Set([
@@ -496,7 +500,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       })
       .catch(() => {});
   }, [attachIdentity, attachToken, resolvedResume, resumeParam, resumeResolution,
-    scopedProfile, selectedProfile, setSearchParams]);
+    scopedProfile, selectedProfile, isFleet, fleetTargetId, setSearchParams]);
 
   useEffect(() => {
     if (!isActive) {
@@ -513,8 +517,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     let cancelled = false;
 
-    api
-      .getSessionDetail(resolvedResume, scopedProfile)
+    (isFleet
+      ? api.getFleetSessionDetail(fleetTargetId, resolvedResume)
+      : api.getSessionDetail(resolvedResume, scopedProfile))
       .then((session) => {
         if (cancelled) return;
         handleSessionTitleChange(normalizeSessionTitle(session.title));
@@ -526,7 +531,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [resolvedResume, scopedProfile, handleSessionTitleChange]);
+  }, [resolvedResume, scopedProfile, isFleet, fleetTargetId, handleSessionTitleChange]);
 
   useEffect(() => {
     if (!resumeParam || !profileScopeReady) return;
@@ -537,8 +542,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     let cancelled = false;
 
-    api
-      .getSessionLatestDescendant(resumeParam, scopedProfile)
+    (isFleet
+      ? api.getFleetSessionLatestDescendant(fleetTargetId, resumeParam)
+      : api.getSessionLatestDescendant(resumeParam, scopedProfile))
       .then((res) => {
         if (cancelled) return;
         const canonical = res.session_id || resumeParam;
@@ -569,7 +575,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [resumeParam, resumeResolution, profileScopeReady, scopedProfile, selectedProfile, setSearchParams]);
+  }, [resumeParam, resumeResolution, profileScopeReady, scopedProfile, selectedProfile, isFleet, fleetTargetId, setSearchParams]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -795,6 +801,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
     const uploadAndAttachImages = (files: File[]) => {
       if (!files.length) return;
+      if (isFleet) {
+        setBanner("Image upload is unavailable for fleet chat.");
+        return;
+      }
       void (async () => {
         const paths: string[] = [];
         for (const file of files) {
@@ -1740,6 +1750,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     resumeParam,
     resolvedResume,
     scopedProfile,
+    isFleet,
     reconnectNonce,
   ]);
 
@@ -2001,8 +2012,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <PluginSlot name="chat:top" />
-      {mobileModelToolsPortal}
+      {!isFleet && <PluginSlot name="chat:top" />}
+      {!isFleet && mobileModelToolsPortal}
 
       {visibleBanner && (
         <div
@@ -2060,7 +2071,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                   >
                     Reconnect now
                   </Button>
-                  {ptyState === "closed" && reconnectGaveUp && (
+                  {!isFleet && ptyState === "closed" && reconnectGaveUp && (
                     <Button
                       size="sm"
                       ghost
@@ -2106,7 +2117,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 >
                   Start new session
                 </Button>
-                {endedReason === "exited" && (
+                {!isFleet && endedReason === "exited" && (
                   <Button
                     outlined
                     onClick={() => navigate("/logs")}
@@ -2144,7 +2155,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </span>
           </Button>
 
-          {chatPanelCollapsed && (
+          {!isFleet && chatPanelCollapsed && (
             <Button
               ghost
               onClick={toggleChatPanel}
@@ -2171,7 +2182,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           )}
         </div>
 
-        {!narrow && !chatPanelCollapsed && (
+        {!isFleet && !narrow && !chatPanelCollapsed && (
           <div
             id="chat-side-panel"
             role="complementary"
@@ -2212,7 +2223,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           </div>
         )}
       </div>
-      <PluginSlot name="chat:bottom" />
+      {!isFleet && <PluginSlot name="chat:bottom" />}
     </div>
   );
 }

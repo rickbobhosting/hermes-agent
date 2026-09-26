@@ -1,8 +1,8 @@
 import type { ProfileInfo } from "@/lib/api";
 
-/** Only the session reader has an external-home contract in this dashboard. */
-export function fleetRouteAllowed(path: string): boolean {
-  return path === "/sessions";
+/** Only explicit target-scoped routes are available for external homes. */
+export function fleetRouteAllowed(path: string, access: "inspect" | "manage" | "execute" = "inspect"): boolean {
+  return path === "/sessions" || (path === "/chat" && access === "execute");
 }
 
 export function fleetSelectionBlocked(profile: string, target: ProfileInfo | undefined): boolean {

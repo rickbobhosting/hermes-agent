@@ -77,6 +77,13 @@ def test_fleet_discovery_and_session_read_respect_configured_access(tmp_path, mo
         assert around.status_code == 200, around.text
         assert [row["content"] for row in around.json()["messages"]] == ["Fleet prompt", "Fleet answer"]
         assert client.get(timeline_url.replace("fleet-session", "sibling-session"), headers=headers).status_code == 404
+        descendant_url = "/api/profiles/fleet/infra/sessions/fleet-session/latest-descendant"
+        assert client.get(descendant_url).status_code == 401
+        descendant = client.get(descendant_url, headers=headers)
+        assert descendant.status_code == 200, descendant.text
+        assert descendant.json()["session_id"] == "fleet-session"
+        assert descendant.json()["path"] == ["fleet-session"]
+        assert client.get(descendant_url.replace("fleet-session", "sibling-session"), headers=headers).status_code == 404
         assert client.get(around_url, params={"row_id": anchor + 1}, headers=headers).status_code == 404
         assert client.get(around_url, params={"row_id": anchor, "limit": 121}, headers=headers).status_code == 422
 

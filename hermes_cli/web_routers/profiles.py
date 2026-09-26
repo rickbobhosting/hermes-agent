@@ -718,6 +718,24 @@ def get_fleet_session_detail(target_id: str, session_id: str):
         db.close()
 
 
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}/latest-descendant")
+def get_fleet_session_latest_descendant(target_id: str, session_id: str):
+    """Resolve an exact registered-target session without searching host homes."""
+    from hermes_cli.web_server_sessions import _session_latest_descendant
+
+    db = _fleet_session_db(target_id)
+    try:
+        if db.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        latest, path = _session_latest_descendant(session_id, db)
+        if not latest or db.get_session(latest) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"requested_session_id": session_id, "session_id": latest,
+                "path": path, "changed": latest != session_id}
+    finally:
+        db.close()
+
+
 @sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}/messages")
 def get_fleet_session_messages(
     target_id: str, session_id: str, limit: int = Query(500, ge=0, le=500),

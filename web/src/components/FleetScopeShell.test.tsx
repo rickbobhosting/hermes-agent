@@ -7,6 +7,7 @@ const scope = vi.hoisted(() => ({
   profile: "fleet:infra",
   currentProfile: "default",
   selectedTarget: undefined as undefined | { display_name: string },
+  canExecute: false,
 }));
 const pluginSlot = vi.hoisted(() => vi.fn(({ name }: { name: string }) => <button>{name} action</button>));
 
@@ -23,6 +24,7 @@ describe("fleet shell scope", () => {
     scope.profile = "fleet:infra";
     scope.currentProfile = "default";
     scope.selectedTarget = undefined;
+    scope.canExecute = false;
     pluginSlot.mockClear();
   });
 
@@ -33,6 +35,10 @@ describe("fleet shell scope", () => {
     cleanup();
     render(<ProfileScopeBanner />);
     expect(screen.getByText(/Inspecting “Infrastructure”/)).toBeTruthy();
+    scope.canExecute = true;
+    cleanup();
+    render(<ProfileScopeBanner />);
+    expect(screen.getByText(/chat executes in this fleet target/)).toBeTruthy();
   });
 
   it("does not mount plugin controls for fleet targets, but preserves local slots", () => {

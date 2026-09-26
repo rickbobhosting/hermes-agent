@@ -800,34 +800,13 @@ export default function App() {
                   </Suspense>
                 </ProfileKeyedRoutes>
 
-                <FleetLocalOnly>{embeddedChat &&
-                  !chatOverriddenByPlugin &&
-                  (pluginsLoading ? (
-                    isChatRoute ? (
-                      <RouteFallback label="Loading chat…" />
-                    ) : null
-                  ) : chatHostMounted ? (
-                    <div
-                      data-chat-active={isChatRoute ? "true" : "false"}
-                      className={cn(
-                        "min-h-0 min-w-0",
-                        isChatRoute ? "flex flex-1 flex-col" : "hidden",
-                      )}
-                      aria-hidden={!isChatRoute}
-                    >
-                      <Suspense
-                        fallback={
-                          isChatRoute ? (
-                            <RouteFallback label="Loading chat…" />
-                          ) : null
-                        }
-                      >
-                        <FleetLocalOnly><ChatPage isActive={isChatRoute} /></FleetLocalOnly>
-                      </Suspense>
-                    </div>
-                  ) : isChatRoute ? (
-                    <RouteFallback label="Loading chat…" />
-                  ) : null)}</FleetLocalOnly>
+                <PersistentChatHost
+                  embeddedChat={embeddedChat}
+                  chatOverriddenByPlugin={chatOverriddenByPlugin}
+                  pluginsLoading={pluginsLoading}
+                  chatHostMounted={chatHostMounted}
+                  isChatRoute={isChatRoute}
+                />
               </div>
               <FleetScopedPluginSlot name="post-main" />
             </div>
@@ -861,13 +840,38 @@ function FleetLocalOnly({ children }: { children: ReactNode }) {
   return profile.startsWith("fleet:") ? null : children;
 }
 
+function PersistentChatHost({ embeddedChat, chatOverriddenByPlugin, pluginsLoading,
+  chatHostMounted, isChatRoute }: {
+    embeddedChat: boolean; chatOverriddenByPlugin: boolean; pluginsLoading: boolean;
+    chatHostMounted: boolean; isChatRoute: boolean;
+  }) {
+  const { profile, selectedTarget, canExecute } = useProfileScope();
+  const fleet = profile.startsWith("fleet:");
+  if (fleet && (fleetSelectionBlocked(profile, selectedTarget) || !canExecute)) return null;
+  // Fleet chat is the built-in, execute-gated PTY. Plugin overrides remain
+  // host-local and never replace a target-scoped chat.
+  if (!embeddedChat || (!fleet && chatOverriddenByPlugin)) return null;
+  if (pluginsLoading) return isChatRoute ? <RouteFallback label="Loading chat…" /> : null;
+  if (!chatHostMounted) return isChatRoute ? <RouteFallback label="Loading chat…" /> : null;
+  return <div
+    data-chat-active={isChatRoute ? "true" : "false"}
+    className={cn("min-h-0 min-w-0", isChatRoute ? "flex flex-1 flex-col" : "hidden")}
+    aria-hidden={!isChatRoute}
+  >
+    <Suspense fallback={isChatRoute ? <RouteFallback label="Loading chat…" /> : null}>
+      <ChatPage isActive={isChatRoute} />
+    </Suspense>
+  </div>;
+}
+
 function FleetRouteGuard({ children, path }: { children: ReactNode; path: string }) {
-  const { profile, selectedTarget } = useProfileScope();
+  const { profile, selectedTarget, access } = useProfileScope();
   if (!profile.startsWith("fleet:")) return children;
   if (fleetSelectionBlocked(profile, selectedTarget)) {
     return <div role="alert" className="p-6 text-sm text-warning">Fleet target unavailable. Choose a registered target.</div>;
   }
-  if (fleetRouteAllowed(path)) return <FleetSessionsPage />;
+  if (path === "/sessions") return <FleetSessionsPage />;
+  if (fleetRouteAllowed(path, access)) return <ChatRouteSink />;
   return <div role="alert" className="p-6 text-sm text-warning">This page has no external fleet scope. Select this dashboard to use it.</div>;
 }
 
@@ -879,7 +883,7 @@ function SidebarNavLink({
   t,
 }: SidebarNavLinkProps) {
   const { path, label, labelKey, icon: Icon } = item;
-  const { profile } = useProfileScope();
+  const { profile, access } = useProfileScope();
   const [hovered, setHovered] = useState(false);
   const [tooltipAnchor, setTooltipAnchor] = useState<HTMLElement | null>(null);
 
@@ -895,7 +899,7 @@ function SidebarNavLink({
     setTooltipAnchor(null);
   };
 
-  if (profile.startsWith("fleet:") && !fleetRouteAllowed(path)) return null;
+  if (profile.startsWith("fleet:") && !fleetRouteAllowed(path, access)) return null;
 
   return (
     <li

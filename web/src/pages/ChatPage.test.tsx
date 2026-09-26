@@ -86,6 +86,9 @@ const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
 const sidebarEvents = vi.hoisted(() => ({
   onPersistentSessionChange: null as null | ((sessionKey: string) => void),
 }));
+const profileScope = vi.hoisted(() => ({
+  profile: "", currentProfile: "default", ready: true, canExecute: true,
+}));
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async (_path: string, _params?: Record<string, string>) => {
     void _path;
@@ -94,6 +97,8 @@ const apiMocks = vi.hoisted(() => ({
   }),
   getSessionLatestDescendant: vi.fn(async (id: string) => ({ session_id: id, path: [id] })),
   getSessionDetail: vi.fn(async () => ({ title: "Saved chat" })),
+  getFleetSessionLatestDescendant: vi.fn(async (_target: string, id: string) => ({ session_id: id, path: [id] })),
+  getFleetSessionDetail: vi.fn(async () => ({ title: "Fleet saved chat" })),
   getSessions: vi.fn(async () => ({ sessions: [] as import("@/lib/api").SessionInfo[] })),
 }));
 const uploadChatImage = vi.hoisted(() =>
@@ -126,7 +131,7 @@ vi.mock("@/contexts/usePageHeader", () => ({
   usePageHeader: () => ({ setEnd: vi.fn(), setTitle: vi.fn() }),
 }));
 vi.mock("@/contexts/useProfileScope", () => ({
-  useProfileScope: () => ({ profile: "", currentProfile: "default", ready: true }),
+  useProfileScope: () => profileScope,
 }));
 vi.mock("@/themes", () => ({
   useTheme: () => ({ theme: { terminalBackground: "#000000" } }),
@@ -216,6 +221,10 @@ async function render(ui: ReactNode) {
 }
 
 beforeEach(() => {
+  profileScope.profile = "";
+  profileScope.currentProfile = "default";
+  profileScope.ready = true;
+  profileScope.canExecute = true;
   FakeWebSocket.instances = [];
   sidebarEvents.onPersistentSessionChange = null;
   maybeReloadForLoopbackWsAuthFailure.mockClear();
@@ -225,8 +234,13 @@ beforeEach(() => {
   apiMocks.getSessionLatestDescendant.mockImplementation(async (id: string) => ({ session_id: id, path: [id] }));
   apiMocks.getSessionDetail.mockReset();
   apiMocks.getSessionDetail.mockResolvedValue({ title: "Saved chat" });
+  apiMocks.getFleetSessionLatestDescendant.mockReset();
+  apiMocks.getFleetSessionLatestDescendant.mockImplementation(async (_target: string, id: string) => ({ session_id: id, path: [id] }));
+  apiMocks.getFleetSessionDetail.mockReset();
+  apiMocks.getFleetSessionDetail.mockResolvedValue({ title: "Fleet saved chat" });
   apiMocks.getSessions.mockReset();
   apiMocks.getSessions.mockResolvedValue({ sessions: [] });
+  uploadChatImage.mockClear();
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal(
     "ResizeObserver",
@@ -279,6 +293,56 @@ beforeEach(() => {
   sessionStorage.clear();
   vi.stubGlobal("localStorage", localStorageMock);
   localStorageMock.clear();
+});
+
+describe("fleet ChatPage", () => {
+  it("does not request a PTY or session lookup before execute access resolves", async () => {
+    profileScope.profile = "fleet:infra";
+    profileScope.canExecute = false;
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(
+      <MemoryRouter initialEntries={["/chat?profile=fleet%3Ainfra&resume=fleet-session"]}>
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    expect(apiMocks.buildWsUrl).not.toHaveBeenCalled();
+    expect(apiMocks.getFleetSessionLatestDescendant).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  it("resumes only through the registered target and omits host controls and image upload", async () => {
+    profileScope.profile = "fleet:infra";
+    profileScope.canExecute = true;
+    localStorage.setItem("hermes-chat-panel-collapsed", "1");
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(
+      <MemoryRouter initialEntries={["/chat?profile=fleet%3Ainfra&resume=fleet-session"]}>
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    await vi.waitFor(() => expect(apiMocks.buildWsUrl).toHaveBeenCalled());
+    expect(apiMocks.getFleetSessionLatestDescendant).toHaveBeenCalledWith("infra", "fleet-session");
+    expect(apiMocks.getFleetSessionDetail).toHaveBeenCalledWith("infra", "fleet-session");
+    expect(apiMocks.getSessionLatestDescendant).not.toHaveBeenCalled();
+    expect(apiMocks.getSessionDetail).not.toHaveBeenCalled();
+    expect(apiMocks.buildWsUrl.mock.calls[0]?.[1]).toMatchObject({
+      profile: "fleet:infra", resume: "fleet-session",
+    });
+    expect(container.querySelector('[role="complementary"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Show chat side panel"]')).toBeNull();
+    expect(sidebarEvents.onPersistentSessionChange).toBeNull();
+
+    const host = container.querySelector(".hermes-chat-xterm-host");
+    expect(host).not.toBeNull();
+    const file = new File([new Uint8Array([1])], "shot.png", { type: "image/png" });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: {
+      files: [file], items: [{ getAsFile: () => file, kind: "file", type: "image/png" }],
+    } });
+    await act(async () => host!.dispatchEvent(paste));
+    expect(uploadChatImage).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Image upload is unavailable for fleet chat.");
+  });
 });
 
 afterEach(async () => {

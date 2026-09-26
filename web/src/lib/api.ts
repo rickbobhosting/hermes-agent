@@ -420,6 +420,10 @@ export const api = {
     fetchJSON<SessionInfo>(
       `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}`,
     ),
+  getFleetSessionLatestDescendant: (targetId: string, id: string) =>
+    fetchJSON<SessionLatestDescendantResponse>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/latest-descendant`,
+    ),
   getFleetSessionMessages: (targetId: string, id: string, offset = 0, limit = 500) =>
     fetchJSON<SessionMessagesResponse>(
       `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages?limit=${limit}&offset=${offset}&order=oldest`,
@@ -2348,7 +2352,7 @@ export interface ProfileInfo {
   has_alias: boolean;
   /** Explicitly registered profile home outside this dashboard's profile tree. */
   external?: boolean;
-  /** Effective access in this candidate; external targets are inspect-only. */
+  /** Registered external target capability; management UI may be narrower. */
   access?: "inspect" | "manage" | "execute";
   read_only?: boolean;
   zone?: string;

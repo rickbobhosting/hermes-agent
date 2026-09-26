@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { chromium, expect } from '@playwright/test';
 
-const [base, sessionId, chromePath] = process.argv.slice(2);
+const [base, sessionId, chromePath, mode] = process.argv.slice(2);
+const fleet = mode === 'fleet';
+const profile = fleet ? 'fleet:infra' : 'acceptance';
 const browser = await chromium.launch({
   ...(chromePath ? { executablePath: chromePath } : {}),
   headless: true,
@@ -13,7 +15,9 @@ try {
   // The sidebar's separate JSON-RPC connection is status-only here. Keep the
   // browser from constructing a real agent; /api/pty remains the real server.
   await page.routeWebSocket('**/api/ws*', socket => socket.close());
-  const unauthorized = await page.request.get(`${base}/api/sessions?profile=acceptance`);
+  const unauthorized = await page.request.get(fleet
+    ? `${base}/api/profiles/fleet/infra/sessions`
+    : `${base}/api/sessions?profile=acceptance`);
   assert.equal(unauthorized.status(), 401, 'protected session API must require the injected token');
   const ptyFrames = [];
   page.on('websocket', socket => {
@@ -25,13 +29,20 @@ try {
   const switcher = page.locator('#hermes-profile-switcher');
   await expect(switcher).toBeVisible();
   await switcher.locator('button').click();
-  await switcher.getByRole('option', { name: 'acceptance' }).click();
-  await expect(switcher.locator('button')).toContainText('acceptance');
-  await page.getByRole('link', { name: 'Chat', exact: true }).click();
-
-  const saved = page.getByText('Fixture continuity', { exact: true });
-  await expect(saved).toBeVisible();
-  await saved.click();
+  await expect.poll(async () => (await switcher.getByRole('option').allTextContents()).join('|'))
+    .toMatch(fleet ? /Infra.*chat/ : /acceptance/);
+  await switcher.getByRole('option', { name: fleet ? /Infra.*chat/ : 'acceptance' }).click();
+  await expect(switcher.locator('button')).toContainText(fleet ? 'Infra' : 'acceptance');
+  if (fleet) {
+    await page.getByRole('button', { name: 'Resume Fixture continuity' }).click();
+    await expect(page.getByRole('link', { name: 'Chat', exact: true })).toBeVisible();
+    await expect(page.locator('[role="complementary"]')).toHaveCount(0);
+  } else {
+    await page.getByRole('link', { name: 'Chat', exact: true }).click();
+    const saved = page.getByText('Fixture continuity', { exact: true });
+    await expect(saved).toBeVisible();
+    await saved.click();
+  }
   await expect.poll(() => new URL(page.url()).searchParams.get('resume')).toBe(sessionId);
   const terminal = page.locator('.hermes-chat-xterm-host');
   await expect(terminal.getByRole('textbox', { name: 'Terminal input' })).toBeVisible();
@@ -67,13 +78,16 @@ try {
   await page.keyboard.press('Enter');
   await expect.poll(() => ptyFrames.join('')).toContain('fixture reply 4: browser after cancel');
 
-  const authorized = await page.evaluate(async id => {
+  const authorized = await page.evaluate(async ({ id, fleet }) => {
     const token = window.__HERMES_SESSION_TOKEN__;
-    const response = await fetch(`/api/sessions/${id}/messages?profile=acceptance`, {
+    const path = fleet
+      ? `/api/profiles/fleet/infra/sessions/${id}/messages?limit=500&order=oldest`
+      : `/api/sessions/${id}/messages?profile=acceptance`;
+    const response = await fetch(path, {
       headers: { 'X-Hermes-Session-Token': token },
     });
     return { status: response.status, body: await response.json() };
-  }, sessionId);
+  }, { id: sessionId, fleet });
   assert.equal(authorized.status, 200);
   assert.deepEqual(authorized.body.messages.map(m => m.content), [
     'first saved question', 'first saved answer',
@@ -84,7 +98,7 @@ try {
 
   ptyFrames.length = 0;
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect.poll(() => new URL(page.url()).searchParams.get('profile')).toBe('acceptance');
+  await expect.poll(() => new URL(page.url()).searchParams.get('profile')).toBe(profile);
   await expect.poll(() => new URL(page.url()).searchParams.get('resume')).toBe(sessionId);
   await expect.poll(() => ptyFrames.join('')).toContain('fixture reply 4: browser after cancel');
   await expect(page.getByRole('heading', { name: 'Fixture continuity' })).toBeVisible();

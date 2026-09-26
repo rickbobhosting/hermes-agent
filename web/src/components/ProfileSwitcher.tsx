@@ -32,7 +32,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
 
   const managed = profile || currentProfile || "default";
   const isOther = !!profile && profile !== currentProfile;
-  const managingLabel = profile.startsWith("fleet:") ? "Inspecting fleet target" : (t.app.managingProfile ?? "Managing profile");
+  const managingLabel = profile.startsWith("fleet:") ? "Selected fleet target" : (t.app.managingProfile ?? "Managing profile");
 
   return (
     <div
@@ -70,10 +70,9 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
           .filter((name) => name !== currentProfile)
           .map((name) => {
             const target = targets.find((item) => item.name === name);
+            const label = `${target?.display_name || name}${target?.zone ? ` · ${target.zone}` : ""}${target?.external ? target.access === "execute" ? " (chat)" : " (inspect)" : ""}`;
             return <SelectOption key={name} value={name}>
-              {target?.display_name || name}
-              {target?.zone ? ` · ${target.zone}` : ""}
-              {target?.external ? " (inspect)" : ""}
+              {label}
             </SelectOption>;
           })}
       </Select>

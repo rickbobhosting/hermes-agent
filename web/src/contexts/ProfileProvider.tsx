@@ -144,11 +144,12 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   );
 
   const selectedTarget = targets.find((target) => target.name === profile);
-  // The merged backend exposes external homes for inspection only. Keep the
-  // effective UI capability fail-closed even if a future/older record advertises
-  // a stronger value without a matching execute or manage route here.
-  const access = isFleetSelector(profile) ? "inspect" as const : "execute" as const;
-  const canManage = access !== "inspect";
+  // Fleet execution has an explicit target-bound PTY contract. Management
+  // remains unavailable until each route has a matching scoped backend.
+  const access = isFleetSelector(profile)
+    ? selectedTarget?.external && selectedTarget.access === "execute" ? "execute" as const : "inspect" as const
+    : "execute" as const;
+  const canManage = !isFleetSelector(profile) && access !== "inspect";
   const canExecute = access === "execute";
   const value = useMemo(
     () => ({ profile, currentProfile, ready, profiles, targets, selectedTarget, access, canManage, canExecute, setProfile }),

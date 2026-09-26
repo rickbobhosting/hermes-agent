@@ -19,13 +19,15 @@ vi.mock("@/lib/api", () => ({
 import { ProfileProvider } from "./ProfileProvider";
 
 function ScopeState() {
-  const { profile, currentProfile, ready, access, selectedTarget } = useProfileScope();
+  const { profile, currentProfile, ready, access, canManage, canExecute, selectedTarget } = useProfileScope();
   return (
     <div>
       <span data-testid="ready">{String(ready)}</span>
       <span data-testid="profile">{profile || "unset"}</span>
       <span data-testid="current">{currentProfile}</span>
       <span data-testid="access">{access}</span>
+      <span data-testid="can-manage">{String(canManage)}</span>
+      <span data-testid="can-execute">{String(canExecute)}</span>
       <span data-testid="selected">{selectedTarget?.name || "unresolved"}</span>
     </div>
   );
@@ -113,6 +115,8 @@ describe("ProfileProvider readiness", () => {
       { name: "fleet:infra", external: true, access: "execute" },
     ] });
     await waitFor(() => expect(screen.getByTestId("selected").textContent).toBe("fleet:infra"));
-    expect(screen.getByTestId("access").textContent).toBe("inspect");
+    expect(screen.getByTestId("access").textContent).toBe("execute");
+    expect(screen.getByTestId("can-manage").textContent).toBe("false");
+    expect(screen.getByTestId("can-execute").textContent).toBe("true");
   });
 });

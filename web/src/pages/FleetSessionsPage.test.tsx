@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, useLocation } from "react-router";
 import { ProfileContext } from "@/contexts/profile-context";
 import type { ProfileInfo, SessionInfo } from "@/lib/api";
 
@@ -45,11 +46,11 @@ describe("fleet session reader", () => {
       { role: "assistant", content: "Focused answer" },
     ] });
 
-    render(<ProfileContext.Provider value={{
+    render(<MemoryRouter><ProfileContext.Provider value={{
       profile: "fleet:infra", currentProfile: "default", ready: true,
       profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
       access: "inspect", canManage: false, canExecute: false, setProfile: vi.fn(),
-    }}><FleetSessionsPage /></ProfileContext.Provider>);
+    }}><FleetSessionsPage /></ProfileContext.Provider></MemoryRouter>);
 
     expect(await screen.findByText("Deployment review")).toBeTruthy();
     fireEvent.click(screen.getByText("Deployment review"));
@@ -91,11 +92,11 @@ describe("fleet session reader", () => {
         pagination: { has_more: true, next_cursor: 17 } })
       .mockReturnValueOnce(more);
 
-    render(<ProfileContext.Provider value={{
+    render(<MemoryRouter><ProfileContext.Provider value={{
       profile: "fleet:infra", currentProfile: "default", ready: true,
       profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
       access: "inspect", canManage: false, canExecute: false, setProfile: vi.fn(),
-    }}><FleetSessionsPage /></ProfileContext.Provider>);
+    }}><FleetSessionsPage /></ProfileContext.Provider></MemoryRouter>);
 
     fireEvent.click(await screen.findByText("Deployment review"));
     expect(await screen.findByText("First page")).toBeTruthy();
@@ -127,11 +128,11 @@ describe("fleet session reader", () => {
       .mockResolvedValueOnce(firstPage)
       .mockReturnValueOnce(currentPage);
 
-    render(<ProfileContext.Provider value={{
+    render(<MemoryRouter><ProfileContext.Provider value={{
       profile: "fleet:infra", currentProfile: "default", ready: true,
       profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
       access: "inspect", canManage: false, canExecute: false, setProfile: vi.fn(),
-    }}><FleetSessionsPage /></ProfileContext.Provider>);
+    }}><FleetSessionsPage /></ProfileContext.Provider></MemoryRouter>);
 
     fireEvent.click(await screen.findByText("Deployment review"));
     expect(await screen.findByRole("button", { name: "More messages" })).toBeTruthy();
@@ -149,5 +150,23 @@ describe("fleet session reader", () => {
     resolveCurrent({ messages: [{ role: "assistant", content: "current page" }] });
     expect(await screen.findByText("current page")).toBeTruthy();
     expect(screen.queryByText("stale page")).toBeNull();
+  });
+
+  it("offers exact-target chat only when execute is granted", async () => {
+    apiMocks.getFleetSessions.mockResolvedValue({ sessions: [session], total: 1 });
+    function Location() {
+      const location = useLocation();
+      return <span data-testid="location">{location.pathname}{location.search}</span>;
+    }
+    render(<MemoryRouter initialEntries={["/sessions?profile=fleet%3Ainfra"]}>
+      <ProfileContext.Provider value={{
+        profile: "fleet:infra", currentProfile: "default", ready: true,
+        profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
+        access: "execute", canManage: false, canExecute: true, setProfile: vi.fn(),
+      }}><FleetSessionsPage /><Location /></ProfileContext.Provider>
+    </MemoryRouter>);
+    expect(await screen.findByRole("button", { name: "Resume Deployment review" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Resume Deployment review" }));
+    expect(screen.getByTestId("location").textContent).toBe("/chat?profile=fleet%3Ainfra&resume=session-1");
   });
 });

@@ -32,7 +32,8 @@ def fleet_chat(tmp_path, monkeypatch):
     (alpha / ".env").write_text("OPENAI_API_KEY=alpha-test-key\n", encoding="utf-8")
     monkeypatch.setattr(main_tui_launch, "_make_tui_argv", lambda *_a, **_kw: (["fake-tui"], tmp_path))
     monkeypatch.setattr(main_tui_launch, "_apply_tui_python_env", lambda _env: None)
-    monkeypatch.setattr(web_server_chat, "_build_gateway_ws_url", lambda: None)
+    monkeypatch.setattr(web_server_chat, "_build_gateway_ws_url", lambda: pytest.fail(
+        "fleet chat must not request the dashboard gateway URL"))
 
     def access(alpha_access="execute", beta_access="execute"):
         (dashboard / "config.yaml").write_text(yaml.safe_dump({"dashboard": {"fleet_targets": {
