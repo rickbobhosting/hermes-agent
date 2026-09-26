@@ -20,6 +20,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--home", type=Path, required=True)
+    parser.add_argument("--server-root", type=Path, required=True)
     parser.add_argument("--profile", default="acceptance")
     args = parser.parse_args()
     home = args.home.resolve(strict=True)
@@ -31,6 +32,8 @@ def main() -> None:
     from hermes_cli.pty_session import PtySessionRegistry
 
     root = Path(__file__).resolve().parents[3]
+    server_root = args.server_root.resolve(strict=True)
+    assert Path(web_server.__file__).resolve().is_relative_to(server_root)
     child = Path(__file__).with_name("continuity_tui.py")
 
     def fixture_argv(*, resume=None, sidecar_url=None, profile=None, active_session_file=None):
@@ -52,7 +55,7 @@ def main() -> None:
         return [sys.executable, str(child)], str(root), child_env
 
     web_server_chat._resolve_chat_argv = fixture_argv
-    registry = PtySessionRegistry(max_sessions=16, buffer_cap=1024 * 1024, read_timeout=0.2)
+    registry = PtySessionRegistry(ttl=30 * 60, max_sessions=16, buffer_cap=1024 * 1024, read_timeout=0.2)
     web_server_chat.PTY_REGISTRY = registry
     web_server.PTY_REGISTRY = registry
     web_server._SESSION_TOKEN = secrets.token_urlsafe(32)
