@@ -282,12 +282,15 @@ async def stop_retained_pty_session(session_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Dashboard task not found.")
     metadata = selected.get("metadata") or {}
     profile = metadata.get("profile")
+    supplied_profile = request.query_params.get("profile")
+    if supplied_profile is not None and supplied_profile != profile:
+        raise HTTPException(status_code=403, detail="Dashboard task selector mismatch.")
     # Stopping an already-owned process is a cleanup operation even after its
     # grant is revoked or registration removed. Bind that cleanup to the exact
     # original selector plus the opaque session ID; a sibling selector cannot
     # stop it. Local PTY callers keep their existing endpoint contract.
     if isinstance(profile, str) and profile.startswith("fleet:"):
-        if request.query_params.get("profile") != profile:
+        if supplied_profile != profile:
             raise HTTPException(status_code=403, detail="Fleet task selector mismatch.")
     if not await registry.stop(session_id):
         raise HTTPException(status_code=404, detail="Dashboard task not found.")

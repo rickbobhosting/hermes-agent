@@ -184,6 +184,17 @@ def test_execute_pty_spawns_in_selected_home_and_keeps_targets_separate(fleet_ch
         access(beta_access="inspect")
         assert client.delete(f"/api/pty/sessions/{beta_session['id']}?profile=fleet:beta", headers=headers).status_code == 200
         assert bridges[1].closed
+
+        async def add_local():
+            session, _ = await registry.attach_or_spawn(
+                "local-task", spawn=Bridge, metadata={"profile": "default"})
+            return session.id
+
+        local_id = client.portal.call(add_local)
+        assert client.delete(f"/api/pty/sessions/{local_id}?profile=fleet:alpha", headers=headers).status_code == 403
+        assert client.request("DELETE", f"/api/pty/sessions/{local_id}",
+                              json={"profile": "fleet:alpha"}, headers=headers).status_code == 403
+        assert client.delete(f"/api/pty/sessions/{local_id}", headers=headers).status_code == 200
     assert [item["HERMES_HOME"] for item in spawned] == [str(alpha), str(beta)]
     assert [item["HERMES_TUI_RESUME"] for item in spawned] == ["alpha-session", "beta-session"]
 

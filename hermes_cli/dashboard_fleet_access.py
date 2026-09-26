@@ -77,7 +77,8 @@ async def dashboard_fleet_access_middleware(request: Request, call_next):
     if is_fleet_selector(selector):
         parts = request.url.path.split("/")
         if (request.method.upper() == "DELETE" and len(parts) == 5
-                and parts[1:4] == ["api", "pty", "sessions"]):
+                and parts[1:4] == ["api", "pty", "sessions"]
+                and body is None and request.query_params.getlist("profile") == [selector]):
             # The route binds this cleanup-only stop to an existing opaque
             # task ID and its original selector. A revoked registration must
             # not prevent termination of its already-running child.
