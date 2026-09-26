@@ -9,10 +9,8 @@ const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   'minimax-oauth': { order: 2, title: 'MiniMax' },
   'qwen-oauth': { order: 3, title: 'Qwen Code' },
   'xai-oauth': { order: 4, title: 'xAI Grok' },
-  // Both Anthropic entries sit at the bottom: the API-key path first, then
-  // the subscription OAuth path (only works with extra usage credits).
+  // Claude Code's external credentials are not a Hermes-managed account.
   anthropic: { order: 5, title: 'Anthropic API Key' },
-  'claude-code': { order: 6, title: 'Anthropic OAuth: Required Extra Usage Credits to Use Subscription' }
 }
 
 const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
