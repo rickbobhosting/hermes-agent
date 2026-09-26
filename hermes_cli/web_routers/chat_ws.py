@@ -7,6 +7,7 @@ reached through the late-binding seam (cycle-safe).
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -125,19 +126,27 @@ def _valid_resume(value: Optional[str]) -> Optional[str]:
 
 def _canonical_profile(raw: Optional[str]) -> tuple[str, Optional[str]]:
     from hermes_cli import profiles
+    from hermes_cli.dashboard_fleet import is_fleet_selector
+    from hermes_cli.dashboard_fleet_access import require_fleet_access
 
     requested = (raw or "").strip()
     if not requested or requested.casefold() == "current":
         return profiles.get_active_profile_name(), None
+    if is_fleet_selector(requested):
+        require_fleet_access(requested, "execute")
+        return requested, requested
     canonical = profiles.normalize_profile_name(requested)
     profiles.validate_profile_name(canonical)
     return canonical, canonical
 
 
-def _retained_channel(token: str, profile: str) -> str:
-    # Browser tokens are minted per profile/resume scope. This channel stays
-    # stable across socket replacements and is never taken from a WS query.
-    return f"pty-{token}"
+def _retained_channel(token: str, profile_scope: str) -> str:
+    # A token reused for another target must never read that target's active
+    # session breadcrumb. The scope includes the resolved registered home.
+    if "\0" not in profile_scope:
+        return f"pty-{token}"
+    digest = hashlib.sha256(profile_scope.encode("utf-8")).hexdigest()[:16]
+    return f"pty-{token}-{digest}"
 
 
 def _public_pty_snapshot(snapshot: dict) -> dict:
@@ -147,6 +156,18 @@ def _public_pty_snapshot(snapshot: dict) -> dict:
         for field in ("id", "alive", "attached", "created_at", "last_attached_at",
                       "last_detached_at", "buffer_bytes", "buffer_truncated")
     } | {"metadata": {field: metadata.get(field) for field in ("profile", "resume") if metadata.get(field) is not None}}
+
+
+def _fleet_pty_access(metadata: dict, required: str) -> bool:
+    """Whether a retained external process still belongs to its registration."""
+    from hermes_cli.dashboard_fleet import is_fleet_selector
+    from hermes_cli.dashboard_fleet_access import require_fleet_access
+
+    profile = metadata.get("profile")
+    if not is_fleet_selector(profile):
+        return True
+    target = require_fleet_access(profile, required)
+    return metadata.get("fleet_home") == str(target.home)
 
 
 async def _forget_pty_channel(app: FastAPI, channel: str) -> None:
@@ -205,7 +226,14 @@ def _pty_registry():
 @router.get("/api/pty/sessions")
 async def retained_pty_sessions(request: Request):
     _require_token(request)
-    return {"sessions": [_public_pty_snapshot(s) for s in await _pty_registry().snapshots()]}
+    visible = []
+    for snapshot in await _pty_registry().snapshots():
+        try:
+            if _fleet_pty_access(snapshot.get("metadata") or {}, "inspect"):
+                visible.append(_public_pty_snapshot(snapshot))
+        except HTTPException:
+            pass
+    return {"sessions": visible}
 
 
 @router.delete("/api/pty/sessions/{session_id}")
@@ -213,7 +241,11 @@ async def stop_retained_pty_session(session_id: str, request: Request):
     _require_token(request)
     registry = _pty_registry()
     selected = next((s for s in await registry.snapshots() if s["id"] == session_id), None)
-    if selected is None or not await registry.stop(session_id):
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Dashboard task not found.")
+    if not _fleet_pty_access(selected.get("metadata") or {}, "execute"):
+        raise HTTPException(status_code=403, detail="Fleet target registration changed.")
+    if not await registry.stop(session_id):
         raise HTTPException(status_code=404, detail="Dashboard task not found.")
     channel = (selected.get("metadata") or {}).get("channel")
     if isinstance(channel, str):
@@ -587,10 +619,23 @@ async def pty_ws(ws: WebSocket) -> None:
         return
     try:
         canonical_profile, resolver_profile = _canonical_profile(ws.query_params.get("profile"))
-    except ValueError as exc:
+    except (ValueError, HTTPException) as exc:
         await _pty_fail(ws, exc)
         return
-    channel = _retained_channel(attach_token, canonical_profile) if attach_token else _channel_or_close_code(ws)
+    from hermes_cli.dashboard_fleet import is_fleet_selector
+    from hermes_cli.dashboard_fleet_access import require_fleet_access
+    try:
+        fleet_target = (require_fleet_access(canonical_profile, "execute")
+                        if is_fleet_selector(canonical_profile) else None)
+    except HTTPException as exc:
+        await _pty_fail(ws, exc)
+        return
+    profile_scope = f"{canonical_profile}\0{fleet_target.home}" if fleet_target else canonical_profile
+    # Legacy caller-supplied channels are global names. An external chat without
+    # a retained token gets no breadcrumb or sidecar channel to collide with a
+    # different target; current browser clients always send an attach token.
+    channel = (_retained_channel(attach_token, profile_scope) if attach_token
+               else None if fleet_target else _channel_or_close_code(ws))
     sidecar_url = _build_sidecar_url(channel) if channel else None
     force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
     resume = None if force_fresh else _valid_resume(raw_resume)
@@ -627,6 +672,17 @@ async def pty_ws(ws: WebSocket) -> None:
         await release_claim()
         raise
 
+    if fleet_target:
+        try:
+            current_target = require_fleet_access(canonical_profile, "execute")
+            if (current_target.home != fleet_target.home or not env
+                    or env.get("HERMES_HOME") != str(fleet_target.home)):
+                raise HTTPException(403, "Fleet target changed while chat was starting.")
+        except HTTPException as exc:
+            await _pty_fail(ws, exc)
+            await release_claim()
+            return
+
     if attach_token is not None:
         # A retained PTY owns its gateway process. Stopping the PTY then
         # terminates the live agent instead of leaving an in-process turn.
@@ -650,8 +706,10 @@ async def pty_ws(ws: WebSocket) -> None:
         await _legacy_pump(ws, bridge)
         return
 
-    key = f"{attach_token}\0{canonical_profile}"
+    key = f"{attach_token}\0{profile_scope}"
     metadata = {"profile": canonical_profile, "resume": resume, "channel": channel}
+    if fleet_target:
+        metadata["fleet_home"] = str(fleet_target.home)
     try:
         session, created = await PTY_REGISTRY.attach_or_spawn(key, spawn=spawn, metadata=metadata)
     except RegistryClosed:

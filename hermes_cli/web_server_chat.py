@@ -315,14 +315,18 @@ def _resolve_chat_argv(
 
     profile_dir: Optional[Path] = None
     requested = (profile or "").strip()
+    from hermes_cli.dashboard_fleet import is_fleet_selector
+    from hermes_cli.dashboard_fleet_access import require_fleet_access
+    fleet_target = require_fleet_access(requested, "execute") if is_fleet_selector(requested) else None
     if requested and requested.lower() != "current":
-        profile_dir = _resolve_profile_dir(requested)
+        profile_dir = fleet_target.home if fleet_target else _resolve_profile_dir(requested)
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
     # Secrets kept — the spawned agent needs provider creds.  An explicit profile
     # scope overrides HERMES_HOME before config is bridged into the env.
-    from tools.environments.local import build_subprocess_env
-    env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=True)
+    from tools.environments.local import build_subprocess_env, served_profile_child_env
+    env = (served_profile_child_env(target_home=profile_dir, inherit_credentials=True)
+           if fleet_target else build_subprocess_env(scrub_secrets=False, inherit_profile_home=True))
     if profile_dir is not None:
         env["HERMES_HOME"] = str(profile_dir)
     try:
@@ -353,9 +357,21 @@ def _resolve_chat_argv(
     env["HERMES_TUI_DASHBOARD"] = "1"
 
     if resume:
-        _resume_db = _open_session_db_for_profile(
-            requested if profile_dir is not None else None, read_only=True)
+        if fleet_target:
+            # Never bootstrap or search another profile's store for an external
+            # resume. The supplied ID must exist exactly in this registered home.
+            from fastapi import HTTPException
+            from hermes_state import SessionDB
+            db_path = fleet_target.home / "state.db"
+            if not db_path.is_file():
+                raise HTTPException(404, "Session not found in selected fleet target.")
+            _resume_db = SessionDB(db_path=db_path, read_only=True)
+        else:
+            _resume_db = _open_session_db_for_profile(
+                requested if profile_dir is not None else None, read_only=True)
         try:
+            if fleet_target and not _resume_db.get_session(resume):
+                raise HTTPException(404, "Session not found in selected fleet target.")
             latest_resume, _latest_path = _session_latest_descendant(resume, _resume_db)
         finally:
             _resume_db.close()
