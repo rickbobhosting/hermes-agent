@@ -8,6 +8,8 @@ const apiMocks = vi.hoisted(() => ({
   getFleetSessions: vi.fn(),
   getFleetSessionDetail: vi.fn(),
   getFleetSessionMessages: vi.fn(),
+  getFleetSessionTimeline: vi.fn(),
+  getFleetSessionMessagesAround: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: apiMocks }));
 
@@ -34,6 +36,14 @@ describe("fleet session reader", () => {
       { role: "user", content: "Review this" },
       { role: "assistant", content: "Reviewed" },
     ] });
+    apiMocks.getFleetSessionTimeline.mockResolvedValue({
+      entries: [{ row_id: 17, preview: "Review this", timestamp: 10 }],
+      pagination: { has_more: false, next_cursor: null },
+    });
+    apiMocks.getFleetSessionMessagesAround.mockResolvedValue({ messages: [
+      { role: "user", content: "Review this" },
+      { role: "assistant", content: "Focused answer" },
+    ] });
 
     render(<ProfileContext.Provider value={{
       profile: "fleet:infra", currentProfile: "default", ready: true,
@@ -43,10 +53,16 @@ describe("fleet session reader", () => {
 
     expect(await screen.findByText("Deployment review")).toBeTruthy();
     fireEvent.click(screen.getByText("Deployment review"));
-    expect(await screen.findByText("Review this")).toBeTruthy();
+    expect(await screen.findAllByText("Review this")).toHaveLength(2);
     expect(screen.getByText("Reviewed")).toBeTruthy();
     expect(apiMocks.getFleetSessionDetail).toHaveBeenCalledWith("infra", "session-1");
     expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledWith("infra", "session-1", 0);
+    expect(apiMocks.getFleetSessionTimeline).toHaveBeenCalledWith("infra", "session-1");
+    fireEvent.click(screen.getByRole("button", { name: "Jump to prompt: Review this" }));
+    expect(await screen.findByText("Focused answer")).toBeTruthy();
+    expect(apiMocks.getFleetSessionMessagesAround).toHaveBeenCalledWith("infra", "session-1", 17);
+    fireEvent.click(screen.getByRole("button", { name: "Full transcript" }));
+    expect(await screen.findByText("Reviewed")).toBeTruthy();
     for (const action of ["Delete", "Rename", "Resume", "Import", "Prune"]) {
       expect(screen.queryByRole("button", { name: new RegExp(action, "i") })).toBeNull();
     }

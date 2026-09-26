@@ -424,6 +424,14 @@ export const api = {
     fetchJSON<SessionMessagesResponse>(
       `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages?limit=500&offset=${offset}&order=oldest`,
     ),
+  getFleetSessionTimeline: (targetId: string, id: string, afterRowId = 0) =>
+    fetchJSON<FleetTimelineResponse>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/timeline?limit=500&after_row_id=${afterRowId}`,
+    ),
+  getFleetSessionMessagesAround: (targetId: string, id: string, rowId: number) =>
+    fetchJSON<SessionMessagesResponse>(
+      `/api/profiles/fleet/${encodeURIComponent(targetId)}/sessions/${encodeURIComponent(id)}/messages/around?row_id=${rowId}&limit=120`,
+    ),
   getSessionMessages: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionMessagesResponse>(
       appendProfileParam(
@@ -2149,6 +2157,20 @@ export interface SessionMessagesResponse {
     offset: number;
     order: "latest" | "oldest";
     returned: number;
+  };
+}
+
+export interface FleetTimelineResponse {
+  session_id: string;
+  profile: string;
+  entries: Array<{ row_id: number; preview: string; timestamp: number }>;
+  pagination: {
+    limit: number;
+    after_row_id: number;
+    returned: number;
+    total: number;
+    has_more: boolean;
+    next_cursor: number | null;
   };
 }
 

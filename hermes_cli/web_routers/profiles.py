@@ -744,6 +744,54 @@ def get_fleet_session_messages(
         db.close()
 
 
+def _fleet_timeline_session_id(db, session_id: str) -> str:
+    """Use an exact session in this target's store, then its local continuation."""
+    if db.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sid = db.resolve_resume_session_id(session_id)
+    if db.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sid
+
+
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}/timeline")
+def get_fleet_session_timeline(
+    target_id: str, session_id: str,
+    limit: int = Query(500, ge=1, le=500), after_row_id: int = Query(0, ge=0),
+):
+    """Bounded prompt index from the exact registered target store."""
+    from hermes_state_timeline import get_session_timeline as read_timeline
+
+    db = _fleet_session_db(target_id)
+    try:
+        sid = _fleet_timeline_session_id(db, session_id)
+        return {"session_id": sid, "profile": f"fleet:{target_id}",
+                **read_timeline(db, sid, limit=limit, after_row_id=after_row_id)}
+    finally:
+        db.close()
+
+
+@sessions_router.get("/api/profiles/fleet/{target_id}/sessions/{session_id}/messages/around")
+def get_fleet_session_messages_around(
+    target_id: str, session_id: str, row_id: int = Query(..., ge=1),
+    limit: int = Query(120, ge=1, le=120),
+):
+    """Fetch one bounded transcript page anchored at a target-owned prompt."""
+    from hermes_cli.web_routers.sessions import _project_for_display
+    from hermes_state_timeline import get_session_messages_around as read_around
+
+    db = _fleet_session_db(target_id)
+    try:
+        sid = _fleet_timeline_session_id(db, session_id)
+        page = read_around(db, sid, row_id, limit=limit)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+        return {"session_id": sid, "profile": f"fleet:{target_id}",
+                **page, "messages": _project_for_display(page["messages"])}
+    finally:
+        db.close()
+
+
 @router.get("/api/profiles")
 async def list_profiles_endpoint():
     return await _read_profiles()

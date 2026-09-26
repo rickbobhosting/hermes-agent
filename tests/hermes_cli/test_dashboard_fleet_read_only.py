@@ -27,7 +27,17 @@ def test_fleet_discovery_and_session_read_respect_configured_access(tmp_path, mo
 
     db = SessionDB(db_path=external / "state.db")
     db.create_session("fleet-session", "web")
+    db.append_messages_batch("fleet-session", [
+        {"role": "user", "content": "Fleet prompt", "timestamp": 10},
+        {"role": "assistant", "content": "Fleet answer", "timestamp": 11},
+    ])
     db.close()
+    sibling_db = SessionDB(db_path=sibling / "state.db")
+    sibling_db.create_session("sibling-session", "web")
+    sibling_db.append_messages_batch("sibling-session", [
+        {"role": "user", "content": "Sibling secret", "timestamp": 12},
+    ])
+    sibling_db.close()
 
     with TestClient(app) as client:
         headers = {_SESSION_HEADER_NAME: _SESSION_TOKEN}
@@ -53,6 +63,22 @@ def test_fleet_discovery_and_session_read_respect_configured_access(tmp_path, mo
         assert sessions.json()["sessions"][0]["profile"] == "fleet:infra"
         assert client.get("/api/profiles/fleet/unregistered/sessions", headers=headers).status_code == 404
         assert client.get("/api/profiles/fleet/infra/sessions?limit=101", headers=headers).status_code == 422
+
+        timeline_url = "/api/profiles/fleet/infra/sessions/fleet-session/timeline"
+        assert client.get(timeline_url).status_code == 401
+        timeline = client.get(timeline_url, headers=headers)
+        assert timeline.status_code == 200, timeline.text
+        assert timeline.json()["profile"] == "fleet:infra"
+        assert [entry["preview"] for entry in timeline.json()["entries"]] == ["Fleet prompt"]
+        assert b"Sibling secret" not in timeline.content
+        anchor = timeline.json()["entries"][0]["row_id"]
+        around_url = "/api/profiles/fleet/infra/sessions/fleet-session/messages/around"
+        around = client.get(around_url, params={"row_id": anchor}, headers=headers)
+        assert around.status_code == 200, around.text
+        assert [row["content"] for row in around.json()["messages"]] == ["Fleet prompt", "Fleet answer"]
+        assert client.get(timeline_url.replace("fleet-session", "sibling-session"), headers=headers).status_code == 404
+        assert client.get(around_url, params={"row_id": anchor + 1}, headers=headers).status_code == 404
+        assert client.get(around_url, params={"row_id": anchor, "limit": 121}, headers=headers).status_code == 422
 
         assert _resolve_profile_dir("fleet:infra") == external
         assert client.post("/api/gateway/restart?profile=fleet:infra", headers=headers).status_code == 403

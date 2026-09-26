@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type SessionInfo, type SessionMessage } from "@/lib/api";
+import { api, type FleetTimelineResponse, type SessionInfo, type SessionMessage } from "@/lib/api";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -30,6 +30,8 @@ export default function FleetSessionsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [timeline, setTimeline] = useState<FleetTimelineResponse | null>(null);
+  const [activePrompt, setActivePrompt] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,21 +67,76 @@ export default function FleetSessionsPage() {
     setExpanded(session.id);
     setDetail(null);
     setMessages([]);
+    setTimeline(null);
+    setActivePrompt(null);
     setDetailLoading(true);
     setError(null);
     try {
-      const [nextDetail, nextMessages] = await Promise.all([
+      const [nextDetail, nextMessages, nextTimeline] = await Promise.all([
         api.getFleetSessionDetail(target, session.id),
         readFleetTranscript(target, session.id),
+        api.getFleetSessionTimeline(target, session.id),
       ]);
       if (request !== detailRequest.current) return;
       setDetail(nextDetail);
       setMessages(nextMessages);
+      setTimeline(nextTimeline);
     } catch (cause) {
       if (request !== detailRequest.current) return;
       setError(cause instanceof Error ? cause.message : "Unable to load session details.");
     } finally {
       if (request === detailRequest.current) setDetailLoading(false);
+    }
+  };
+
+  const jumpToPrompt = async (sessionId: string, rowId: number) => {
+    const request = ++detailRequest.current;
+    setDetailLoading(true);
+    setError(null);
+    try {
+      const page = await api.getFleetSessionMessagesAround(target, sessionId, rowId);
+      if (request !== detailRequest.current) return;
+      setMessages(page.messages);
+      setActivePrompt(rowId);
+    } catch (cause) {
+      if (request !== detailRequest.current) return;
+      setError(cause instanceof Error ? cause.message : "Unable to read that prompt.");
+    } finally {
+      if (request === detailRequest.current) setDetailLoading(false);
+    }
+  };
+
+  const showFullTranscript = async (sessionId: string) => {
+    const request = ++detailRequest.current;
+    setDetailLoading(true);
+    setError(null);
+    try {
+      const full = await readFleetTranscript(target, sessionId);
+      if (request !== detailRequest.current) return;
+      setMessages(full);
+      setActivePrompt(null);
+    } catch (cause) {
+      if (request !== detailRequest.current) return;
+      setError(cause instanceof Error ? cause.message : "Unable to read the transcript.");
+    } finally {
+      if (request === detailRequest.current) setDetailLoading(false);
+    }
+  };
+
+  const loadMorePrompts = async (sessionId: string) => {
+    const cursor = timeline?.pagination.next_cursor;
+    if (cursor == null) return;
+    const request = detailRequest.current;
+    setError(null);
+    try {
+      const next = await api.getFleetSessionTimeline(target, sessionId, cursor);
+      if (request !== detailRequest.current) return;
+      setTimeline((previous) => previous ? {
+        ...next, entries: [...previous.entries, ...next.entries],
+      } : next);
+    } catch (cause) {
+      if (request !== detailRequest.current) return;
+      setError(cause instanceof Error ? cause.message : "Unable to load more prompts.");
     }
   };
 
@@ -124,6 +181,19 @@ export default function FleetSessionsPage() {
                 <div className="mt-3 space-y-3 border-t border-border pt-3">
                   {detailLoading ? <Spinner /> : detail && <>
                     <p className="text-xs text-muted-foreground">{detail.id} · {detail.model || "Unknown model"}</p>
+                    {timeline && timeline.entries.length > 0 && <div className="space-y-2 rounded border border-border p-2">
+                      <p className="text-xs font-semibold">Prompt timeline</p>
+                      <div className="max-h-32 space-y-1 overflow-y-auto">
+                        {timeline.entries.map((entry) => <button
+                          key={entry.row_id} type="button"
+                          className="block w-full truncate text-left text-xs underline-offset-2 hover:underline"
+                          aria-label={`Jump to prompt: ${entry.preview}`}
+                          onClick={() => void jumpToPrompt(session.id, entry.row_id)}
+                        >{entry.preview}</button>)}
+                      </div>
+                      {timeline.pagination.has_more && <Button outlined size="sm" onClick={() => void loadMorePrompts(session.id)}>More prompts</Button>}
+                      {activePrompt !== null && <Button outlined size="sm" onClick={() => void showFullTranscript(session.id)}>Full transcript</Button>}
+                    </div>}
                     {messages.map((message, index) => (
                       <div key={index} className="rounded bg-secondary/30 p-3">
                         <p className="mb-1 text-xs font-semibold">{message.role}{message.tool_name ? ` · ${message.tool_name}` : ""}</p>
