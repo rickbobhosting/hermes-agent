@@ -144,12 +144,13 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   );
 
   const selectedTarget = targets.find((target) => target.name === profile);
-  // Fleet execution has an explicit target-bound PTY contract. Management
-  // remains unavailable until each route has a matching scoped backend.
+  // Expose only the registered capability. Routes still need their own
+  // target-scoped backend contract before the fleet guard admits them.
   const access = isFleetSelector(profile)
-    ? selectedTarget?.external && selectedTarget.access === "execute" ? "execute" as const : "inspect" as const
+    ? selectedTarget?.external && (selectedTarget.access === "manage" || selectedTarget.access === "execute")
+      ? selectedTarget.access : "inspect" as const
     : "execute" as const;
-  const canManage = !isFleetSelector(profile) && access !== "inspect";
+  const canManage = access !== "inspect";
   const canExecute = access === "execute";
   const value = useMemo(
     () => ({ profile, currentProfile, ready, profiles, targets, selectedTarget, access, canManage, canExecute, setProfile }),

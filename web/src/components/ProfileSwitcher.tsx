@@ -70,7 +70,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
           .filter((name) => name !== currentProfile)
           .map((name) => {
             const target = targets.find((item) => item.name === name);
-            const label = `${target?.display_name || name}${target?.zone ? ` · ${target.zone}` : ""}${target?.external ? target.access === "execute" ? " (chat)" : " (inspect)" : ""}`;
+            const label = `${target?.display_name || name}${target?.zone ? ` · ${target.zone}` : ""}${target?.external ? target.access === "execute" ? " (chat + config)" : target.access === "manage" ? " (config)" : " (inspect)" : ""}`;
             return <SelectOption key={name} value={name}>
               {label}
             </SelectOption>;

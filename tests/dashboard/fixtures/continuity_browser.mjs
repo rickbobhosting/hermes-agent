@@ -102,6 +102,43 @@ try {
   await expect.poll(() => new URL(page.url()).searchParams.get('resume')).toBe(sessionId);
   await expect.poll(() => ptyFrames.join('')).toContain('fixture reply 4: browser after cancel');
   await expect(page.getByRole('heading', { name: 'Fixture continuity' })).toBeVisible();
+  if (fleet) {
+    await page.goto(`${base}/config?profile=fleet%3Ainfra`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('code').filter({ hasText: /external-infra\/config.yaml/ })).toBeVisible();
+    await page.getByRole('button', { name: 'YAML', exact: true }).click();
+    const yaml = page.locator('textarea');
+    await expect(yaml).toBeVisible();
+    await yaml.fill('display:\n  streaming: true\n');
+    await expect(yaml).toHaveValue('display:\n  streaming: true\n');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect.poll(async () => page.evaluate(async () => {
+      const response = await fetch('/api/config/raw?profile=fleet%3Ainfra', {
+        headers: { 'X-Hermes-Session-Token': window.__HERMES_SESSION_TOKEN__ },
+      });
+      return (await response.json()).yaml.includes('streaming: true');
+    })).toBe(true);
+    const scopedConfig = await page.evaluate(async () => {
+      const response = await fetch('/api/config?profile=fleet%3Ainfra', {
+        headers: { 'X-Hermes-Session-Token': window.__HERMES_SESSION_TOKEN__ },
+      });
+      return (await response.json()).display?.streaming;
+    });
+    assert.equal(scopedConfig, true);
+    await page.goto(`${base}/config?profile=fleet%3Areadonly`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('code').filter({ hasText: /external-readonly\/config.yaml/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'YAML', exact: true }).click();
+    await expect(page.locator('textarea')).toHaveAttribute('readonly', '');
+    const denied = await page.evaluate(async () => {
+      const response = await fetch('/api/config/raw?profile=fleet%3Areadonly', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Hermes-Session-Token': window.__HERMES_SESSION_TOKEN__ },
+        body: JSON.stringify({ yaml_text: 'display:\n  streaming: true\n' }),
+      });
+      return response.status;
+    });
+    assert.equal(denied, 403);
+  }
   console.log('authenticated dashboard continuity accepted');
 } finally {
   await browser.close();

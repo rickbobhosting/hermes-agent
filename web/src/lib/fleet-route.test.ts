@@ -7,6 +7,7 @@ const registered = { name: "fleet:infra", external: true } as ProfileInfo;
 describe("external fleet page boundary", () => {
   it("allows only the scoped session reader, including against plugin routes", () => {
     expect(fleetRouteAllowed("/sessions")).toBe(true);
+    expect(fleetRouteAllowed("/config")).toBe(true);
     expect(fleetRouteAllowed("/chat", "execute")).toBe(true);
     expect(fleetRouteAllowed("/chat", "inspect")).toBe(false);
     for (const path of ["/", "/profiles", "/cron", "/files", "/plugin-tab"]) {

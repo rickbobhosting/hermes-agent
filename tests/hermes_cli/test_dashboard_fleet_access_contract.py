@@ -64,8 +64,14 @@ def test_manage_write_and_selector_conflicts(fleet):
     body = {"content": "# Managed target\n"}
 
     assert client.put(url, json=body).status_code == 403
+    assert client.put("/api/config/raw?profile=fleet:target", json={
+        "yaml_text": "timezone: America/Los_Angeles\n"
+    }).status_code == 403
     assert not (target / "SOUL.md").exists()
     set_access("manage")
+    raw = client.get("/api/config/raw?profile=fleet:target")
+    assert raw.status_code == 200, raw.text
+    assert raw.json()["path"] == str(target / "config.yaml")
     assert client.put(url, json=body).status_code == 200
     assert (target / "SOUL.md").read_text(encoding="utf-8") == body["content"]
     assert not (sibling / "SOUL.md").exists()
@@ -74,12 +80,21 @@ def test_manage_write_and_selector_conflicts(fleet):
     })
     assert config_write.status_code == 200, config_write.text
     assert yaml.safe_load((target / "config.yaml").read_text(encoding="utf-8"))["timezone"] == "Europe/London"
+    raw_write = client.put("/api/config/raw?profile=fleet:target", json={
+        "yaml_text": "timezone: America/Los_Angeles\n"
+    })
+    assert raw_write.status_code == 200, raw_write.text
+    assert yaml.safe_load((target / "config.yaml").read_text(encoding="utf-8"))["timezone"] == "America/Los_Angeles"
+    assert (sibling / "config.yaml").read_text(encoding="utf-8") == "timezone: UTC\n"
 
     conflict = client.put(url + "?profile=default", json=body)
     assert conflict.status_code == 400
     assert client.put(url + "?profile=fleet:sibling", json=body).status_code == 400
     assert client.put("/api/config?profile=fleet:target", json={
         "profile": "default", "config": {"timezone": "Europe/London"}
+    }).status_code == 400
+    assert client.put("/api/config/raw?profile=fleet:target", json={
+        "profile": "default", "yaml_text": "timezone: Europe/London\n"
     }).status_code == 400
     assert client.post("/api/gateway/restart?profile=fleet:target").status_code == 403
     assert client.post("/api/profiles/active", json={"name": "fleet:target"}).status_code == 403

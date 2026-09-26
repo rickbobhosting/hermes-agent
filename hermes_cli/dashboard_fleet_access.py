@@ -57,7 +57,7 @@ def _required_access(request: Request) -> str | None:
     if method == "PUT" and len(parts) == 5 and parts[1:3] == ["api", "profiles"]:
         if parts[4] in {"soul", "description", "model"}:
             return "manage"
-    if method == "PUT" and path == "/api/config":
+    if method == "PUT" and path in {"/api/config", "/api/config/raw"}:
         return "manage"
     return None
 

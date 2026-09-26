@@ -8,15 +8,17 @@ import { useI18n } from "@/i18n";
  * skills, MCPs, model) and new Chat sessions land in that profile.
  */
 export function ProfileScopeBanner() {
-  const { profile, currentProfile, selectedTarget, canExecute } = useProfileScope();
+  const { profile, currentProfile, selectedTarget, canManage, canExecute } = useProfileScope();
   const { t } = useI18n();
 
   if (!profile || profile === currentProfile) return null;
 
   const message = profile.startsWith("fleet:")
     ? canExecute
-      ? `Viewing “${selectedTarget?.display_name || profile}” — chat executes in this fleet target; management stays unavailable.`
-      : `Inspecting “${selectedTarget?.display_name || profile}” — changes and interactive execution are unavailable.`
+      ? `Viewing “${selectedTarget?.display_name || profile}” — chat and config changes target this fleet profile; other management pages remain unavailable.`
+      : canManage
+        ? `Viewing “${selectedTarget?.display_name || profile}” — config changes target this fleet profile; chat and other management pages remain unavailable.`
+        : `Inspecting “${selectedTarget?.display_name || profile}” — changes and interactive execution are unavailable.`
     : (
         t.app.managingProfileBanner ??
         "Managing profile “{name}” — config, keys, skills, MCPs, model, and new chats apply to that profile."

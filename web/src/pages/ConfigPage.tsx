@@ -52,6 +52,7 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { errorMessage } from "@/lib/api-error";
+import { useProfileScope } from "@/contexts/useProfileScope";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -125,6 +126,8 @@ export default function ConfigPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const { profile, canManage } = useProfileScope();
+  const isFleet = profile.startsWith("fleet:");
 
   useLayoutEffect(() => {
     if (!config || !schema) {
@@ -197,11 +200,13 @@ export default function ConfigPage() {
         if (resp.path) setConfigPath(resp.path);
       })
       .catch(() => {});
-    api
-      .getStatus()
-      .then((resp) => setConfigPath((prev) => prev ?? resp.config_path))
-      .catch(() => {});
-  }, []);
+    if (!isFleet) {
+      api
+        .getStatus()
+        .then((resp) => setConfigPath((prev) => prev ?? resp.config_path))
+        .catch(() => {});
+    }
+  }, [isFleet]);
 
   // Set active category when categories load
   useEffect(() => {
@@ -278,7 +283,7 @@ export default function ConfigPage() {
 
   /* ---- Handlers ---- */
   const handleSave = async () => {
-    if (!config) return;
+    if (!config || !canManage) return;
     setSaving(true);
     try {
       await api.saveConfig(config);
@@ -291,6 +296,7 @@ export default function ConfigPage() {
   };
 
   const handleYamlSave = async () => {
+    if (!canManage || yamlLoading) return;
     setYamlSaving(true);
     try {
       await api.saveConfigRaw(yamlText);
@@ -307,7 +313,7 @@ export default function ConfigPage() {
   };
 
   const handleReset = () => {
-    if (!defaults || !config) return;
+    if (!defaults || !config || !canManage) return;
     // Scope the reset to what the user is currently looking at:
     //   - search mode → the matched fields
     //   - form mode   → the active category's fields
@@ -320,7 +326,7 @@ export default function ConfigPage() {
   };
 
   const executeReset = () => {
-    if (!defaults || !config) return;
+    if (!defaults || !config || !canManage) return;
     setConfirmReset(false);
     const scopedFields = isSearching ? searchMatchedFields : activeFields;
     if (scopedFields.length === 0) return;
@@ -352,6 +358,7 @@ export default function ConfigPage() {
   };
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canManage) return;
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -419,12 +426,16 @@ export default function ConfigPage() {
             </div>
           )}
           <div className="py-1">
-            <AutoField
-              schemaKey={key}
-              schema={s}
-              value={getNestedValue(config, key)}
-              onChange={(v) => setConfig(setNestedValue(config, key, v))}
-            />
+            <fieldset disabled={!canManage} className="m-0 min-w-0 border-0 p-0">
+              <AutoField
+                schemaKey={key}
+                schema={s}
+                value={getNestedValue(config, key)}
+                onChange={(v) => {
+                  if (canManage) setConfig(setNestedValue(config, key, v));
+                }}
+              />
+            </fieldset>
           </div>
         </div>
       );
@@ -433,7 +444,7 @@ export default function ConfigPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PluginSlot name="config:top" />
+      {!isFleet && <PluginSlot name="config:top" />}
       <Toast toast={toast} />
 
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
@@ -453,23 +464,25 @@ export default function ConfigPage() {
           >
             <Download />
           </Button>
-          <Button
-            ghost
-            size="icon"
-            onClick={() => fileInputRef.current?.click()}
-            title={t.config.importConfig}
-            aria-label={t.config.importConfig}
-          >
-            <Upload />
-          </Button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            className="hidden"
-            onChange={handleImport}
-          />
-          {!yamlMode &&
+          {canManage && <>
+            <Button
+              ghost
+              size="icon"
+              onClick={() => fileInputRef.current?.click()}
+              title={t.config.importConfig}
+              aria-label={t.config.importConfig}
+            >
+              <Upload />
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={handleImport}
+            />
+          </>}
+          {canManage && !yamlMode &&
             (() => {
               const resetScopeLabel = isSearching
                 ? t.config.searchResults
@@ -496,18 +509,21 @@ export default function ConfigPage() {
           <Button
             size="sm"
             outlined={!yamlMode}
-            onClick={() => setYamlMode(!yamlMode)}
+            onClick={() => {
+              if (!yamlMode) setYamlLoading(true);
+              setYamlMode(!yamlMode);
+            }}
             prefix={yamlMode ? <FormInput /> : <Code />}
           >
             {yamlMode ? t.common.form : "YAML"}
           </Button>
 
-          {yamlMode ? (
+          {!canManage ? null : yamlMode ? (
             <Button
               size="sm"
               className="uppercase"
               onClick={handleYamlSave}
-              disabled={yamlSaving}
+              disabled={yamlSaving || yamlLoading}
             >
               {yamlSaving ? t.common.saving : t.common.save}
             </Button>
@@ -542,6 +558,7 @@ export default function ConfigPage() {
                 className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none border-t border-border"
                 value={yamlText}
                 onChange={(e) => setYamlText(e.target.value)}
+                readOnly={!canManage}
                 spellCheck={false}
               />
             )}
@@ -658,8 +675,8 @@ export default function ConfigPage() {
           </div>
         </div>
       )}
-      <PluginSlot name="config:bottom" />
-      <ConfirmDialog
+      {!isFleet && <PluginSlot name="config:bottom" />}
+      {canManage && <ConfirmDialog
         open={confirmReset}
         onCancel={() => setConfirmReset(false)}
         onConfirm={executeReset}
@@ -674,7 +691,7 @@ export default function ConfigPage() {
         } field(s) to their default values.`}
         destructive
         confirmLabel={t.config.resetDefaults}
-      />
+      />}
     </div>
   );
 }

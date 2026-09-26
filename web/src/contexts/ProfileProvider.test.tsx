@@ -97,7 +97,7 @@ describe("ProfileProvider readiness", () => {
     expect(screen.getByTestId("current").textContent).toBe("default");
   });
 
-  it("keeps an external deep link in inspect mode before and after registry resolution", async () => {
+  it("holds an external deep link in inspect mode until its capability resolves", async () => {
     const profiles = deferred<{ profiles: { name: string; external?: boolean; access?: string }[] }>();
     apiMocks.getProfiles.mockReturnValue(profiles.promise);
     apiMocks.getActiveProfile.mockResolvedValue({ current: "default", active: "default" });
@@ -116,7 +116,22 @@ describe("ProfileProvider readiness", () => {
     ] });
     await waitFor(() => expect(screen.getByTestId("selected").textContent).toBe("fleet:infra"));
     expect(screen.getByTestId("access").textContent).toBe("execute");
-    expect(screen.getByTestId("can-manage").textContent).toBe("false");
+    expect(screen.getByTestId("can-manage").textContent).toBe("true");
     expect(screen.getByTestId("can-execute").textContent).toBe("true");
+  });
+
+  it("allows configured fleet management without granting chat execution", async () => {
+    apiMocks.getProfiles.mockResolvedValue({ profiles: [
+      { name: "default" },
+      { name: "fleet:infra", external: true, access: "manage" },
+    ] });
+    apiMocks.getActiveProfile.mockResolvedValue({ current: "default", active: "default" });
+    render(<MemoryRouter initialEntries={["/config?profile=fleet%3Ainfra"]}>
+      <ProfileProvider><ScopeState /></ProfileProvider>
+    </MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("selected").textContent).toBe("fleet:infra"));
+    expect(screen.getByTestId("access").textContent).toBe("manage");
+    expect(screen.getByTestId("can-manage").textContent).toBe("true");
+    expect(screen.getByTestId("can-execute").textContent).toBe("false");
   });
 });

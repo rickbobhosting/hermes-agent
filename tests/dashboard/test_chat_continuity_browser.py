@@ -71,8 +71,12 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     (profile_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     if fleet:
         import yaml
+        inspect_home = tmp_path / "external-readonly"
+        inspect_home.mkdir()
+        (inspect_home / "config.yaml").write_text("display:\n  streaming: false\n", encoding="utf-8")
         (hermes_home / "config.yaml").write_text(yaml.safe_dump({"dashboard": {"fleet_targets": {
             "infra": {"home": str(profile_home), "label": "Infra", "access": "execute"},
+            "readonly": {"home": str(inspect_home), "label": "Readonly", "access": "inspect"},
         }}}), encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -170,6 +174,11 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
             "browser turn two", "fixture reply 3: browser turn two",
             "browser after cancel", "fixture reply 4: browser after cancel",
         ]
+        if fleet:
+            import yaml
+            assert yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8"))["display"]["streaming"] is True
+            assert yaml.safe_load((inspect_home / "config.yaml").read_text(encoding="utf-8"))["display"]["streaming"] is False
+            assert "fleet_targets" in (hermes_home / "config.yaml").read_text(encoding="utf-8")
     finally:
         server.should_exit = True
         thread.join(timeout=10)

@@ -864,14 +864,17 @@ function PersistentChatHost({ embeddedChat, chatOverriddenByPlugin, pluginsLoadi
   </div>;
 }
 
-function FleetRouteGuard({ children, path }: { children: ReactNode; path: string }) {
+export function FleetRouteGuard({ children, path }: { children: ReactNode; path: string }) {
   const { profile, selectedTarget, access } = useProfileScope();
   if (!profile.startsWith("fleet:")) return children;
   if (fleetSelectionBlocked(profile, selectedTarget)) {
     return <div role="alert" className="p-6 text-sm text-warning">Fleet target unavailable. Choose a registered target.</div>;
   }
   if (path === "/sessions") return <FleetSessionsPage />;
-  if (fleetRouteAllowed(path, access)) return <ChatRouteSink />;
+  // A host plugin may override /config in buildRoutes. Fleet mode must render
+  // this audited target-scoped page, never the plugin-provided route element.
+  if (path === "/config" && fleetRouteAllowed(path, access)) return <ConfigPage />;
+  if (path === "/chat" && fleetRouteAllowed(path, access)) return <ChatRouteSink />;
   return <div role="alert" className="p-6 text-sm text-warning">This page has no external fleet scope. Select this dashboard to use it.</div>;
 }
 
