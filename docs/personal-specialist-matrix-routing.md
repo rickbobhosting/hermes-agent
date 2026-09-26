@@ -23,6 +23,10 @@ receiving Orchestra Matrix account. Missing or mismatched configuration fails
 gateway startup rather than silently dispatching to another bot. The bearer is
 read from the gateway's profile-scoped environment at request time and is
 never included in a URL or log line.
+When Matrix starts with only an access token, `whoami` fills its account after
+the handlers are wired. The rules provide the expected account at startup;
+events use the existing Matrix handler until the authenticated account matches
+it. A configured account that contradicts the rules fails startup.
 The client bypasses process proxy settings and HTTP redirects so its bearer
 and prompt stay on `127.0.0.1`.
 

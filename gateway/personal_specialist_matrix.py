@@ -184,11 +184,12 @@ def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
     if not enabled:
         return None
     rules_raw = settings.get("rules_path")
-    account = str(getattr(adapter, "_user_id", ""))
-    if not isinstance(rules_raw, str) or not rules_raw or not Path(rules_raw).is_absolute() or not account:
-        raise ValueError("personal routing needs absolute rules path and Matrix account")
+    if not isinstance(rules_raw, str) or not rules_raw or not Path(rules_raw).is_absolute():
+        raise ValueError("personal routing needs absolute rules path")
     rules = Rules.load(Path(rules_raw))
-    if rules.owner_accounts.get("matrix") != account:
+    account = rules.owner_accounts.get("matrix")
+    configured_account = str(getattr(adapter, "_user_id", "") or "")
+    if not account or (configured_account and configured_account != account):
         raise ValueError("personal routing Matrix owner does not match this adapter")
     if not get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", ""):
         raise ValueError("personal routing needs Orchestra invocation credential")

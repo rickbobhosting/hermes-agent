@@ -261,6 +261,41 @@ def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch)
     values["HERMES_PERSONAL_INVOCATION_TOKEN"] = ""
     with pytest.raises(ValueError, match="credential"):
         build_opt_in_router(adapter)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 1\nowner_accounts: {}\nroom_defaults: []\nkeywords: {}\n")
+    with pytest.raises(ValueError, match="owner"):
+        build_opt_in_router(SimpleNamespace(_user_id="", config=adapter.config))
+
+
+@pytest.mark.asyncio
+async def test_token_only_matrix_identity_routes_only_after_matching_whoami(tmp_path, monkeypatch):
+    import gateway.platforms._shared as shared
+
+    monkeypatch.setattr(shared, "get_scoped_secret", lambda key, default="":
+                        "test-only" if key == "HERMES_PERSONAL_INVOCATION_TOKEN" else default)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text(
+        "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
+        "room_defaults: []\nkeywords: {}\n")
+    adapter = SimpleNamespace(_user_id="", config=PlatformConfig(extra={
+        "personal_routing": {"version": 1, "enabled": True, "rules_path": str(rules_path)}}))
+    dispatch = build_opt_in_router(adapter)
+    assert dispatch.account == ACCOUNT
+    client = FakeClient()
+    dispatch.client = client
+
+    async def fallback(_event):
+        return "Orchestra"
+
+    assert await dispatch.handle(_event(), fallback) == "Orchestra"
+    assert not client.calls
+    adapter._user_id = ACCOUNT  # Matrix connect() filled this from authenticated whoami.
+    assert await dispatch.handle(_event(), fallback) == "[geo]\nDone."
+    assert len(client.calls) == 1
+    adapter._user_id = "@unexpected:example.org"
+    assert await dispatch.handle(_event(event_id="$event-b"), fallback) == "Orchestra"
+    assert len(client.calls) == 1
 
 
 def test_personal_routing_requires_versioned_boolean_yaml_and_ignores_old_env(tmp_path, monkeypatch):
