@@ -8,10 +8,12 @@ fixture; no provider or model is contacted.
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -33,7 +35,7 @@ def _free_loopback_port() -> int:
         return listener.getsockname()[1]
 
 
-def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeypatch):
+def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeypatch, request):
     if sys.platform == "win32":
         pytest.skip("POSIX PTY fixture")
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or ""
@@ -47,11 +49,20 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     for name in tuple(os.environ):
         if name.startswith("HERMES_"):
             monkeypatch.delenv(name)
+    for name in ("GATEWAY_HEALTH_URL", "GATEWAY_HEALTH_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
 
     # Both Path.home() and HERMES_HOME must resolve inside this test. A named
     # profile under the candidate's real ~/.hermes would violate isolation.
     home = tmp_path / "user"
     home.mkdir()
+    # Chromium's SingletonSocket has a short Unix-path limit; pytest's long
+    # per-test path exceeds it. This short disposable directory is removed by
+    # a finalizer even when startup fails before the listener's try/finally.
+    temp_dir = Path(tempfile.mkdtemp(prefix="hchat-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+    monkeypatch.setenv("TMPDIR", str(temp_dir))
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
     hermes_home = tmp_path / "hermes-fixture"
     profile_home = hermes_home / "profiles" / "acceptance"
     profile_home.mkdir(parents=True)
@@ -73,6 +84,12 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     from hermes_cli import web_server
     from hermes_cli import web_server_chat
 
+    # Another pytest module may have imported web_server before this test
+    # cleared inherited variables. Give this app run its own token regardless
+    # of collection/import order; SPA injection reads the server value live.
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", secrets.token_urlsafe(32))
+    monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", None)
+
     def fixture_argv(*, resume=None, sidecar_url=None, profile=None, active_session_file=None):
         assert profile == "acceptance"
         assert resume in (None, session_id)
@@ -83,6 +100,7 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
             "HERMES_TUI_RESUME": resume or "fixture-fresh",
             "HERMES_TEST_ISOLATION": str(hermes_home),
             "PYTHONPATH": str(ROOT),
+            "TMPDIR": str(temp_dir),
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
         }
@@ -115,6 +133,7 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
             "HOME": str(home),
             "HERMES_HOME": str(hermes_home),
             "HERMES_TEST_ISOLATION": str(hermes_home),
+            "TMPDIR": str(temp_dir),
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
         }

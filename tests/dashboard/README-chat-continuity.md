@@ -22,8 +22,11 @@ inside Playwright, so it cannot construct an agent or call a model.
 
 Pytest's temporary directory owns `HOME`, `HERMES_HOME`, XDG paths, the named
 profile, PTY child, and session store. The fixture clears inherited Hermes
-launch flags before importing the server and gives the PTY child and browser
-minimal environments. The listener and browser close at teardown. The test
+launch flags and gateway health URL before importing the server, replaces a
+previously imported server's session token and health target, and gives the
+PTY child and browser minimal environments. Chromium and PTY temporary files
+use a separate short `/tmp/hchat-*` directory to fit Unix socket path limits;
+pytest removes it at teardown. The listener and browser close at teardown. The test
 uses the candidate's ignored `hermes_cli/web_dist` build output.
 
 This proves the candidate loopback UI/PTY path with a fixed fake child. It
