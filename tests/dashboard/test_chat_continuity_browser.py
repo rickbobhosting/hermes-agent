@@ -84,6 +84,9 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     from hermes_cli import web_server
     from hermes_cli import web_server_chat
     from hermes_cli.pty_session import PtySessionRegistry
+    assert web_server.WEB_DIST.resolve() == dist.resolve(), (
+        "web_server was imported with a different dashboard bundle"
+    )
 
     # Another pytest module may have imported web_server before this test
     # cleared inherited variables. Give this app run its own token regardless
