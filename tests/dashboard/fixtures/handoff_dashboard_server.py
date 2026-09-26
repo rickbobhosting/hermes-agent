@@ -59,6 +59,38 @@ def main() -> None:
     registry = PtySessionRegistry(ttl=30 * 60, max_sessions=16, buffer_cap=1024 * 1024, read_timeout=0.2)
     web_server_chat.PTY_REGISTRY = registry
     web_server.PTY_REGISTRY = registry
+
+    def candidate_fixture_pty():
+        from fastapi import HTTPException
+
+        matches = [session for session in registry._sessions.values()
+                   if session.metadata.get("resume") == "candidate-saved"]
+        if len(matches) != 1:
+            raise HTTPException(409, "expected one candidate fixture PTY")
+        return matches[0]
+
+    @web_server.app.get("/__fixture/pty-identity")
+    async def fixture_pty_identity():
+        session = candidate_fixture_pty()
+        return {"id": session.id, "pid": session.bridge.pid, "attached": session.attached}
+
+    @web_server.app.post("/__fixture/drop-pty")
+    async def drop_fixture_pty():
+        from fastapi import HTTPException
+
+        session = candidate_fixture_pty()
+        if not session.attached:
+            raise HTTPException(409, "candidate fixture PTY is detached")
+        await session._attachment.ws.close(code=1001, reason="fixture_transport_drop")
+        return {"id": session.id, "pid": session.bridge.pid}
+
+    # The production SPA catch-all is already registered; fixture-only routes
+    # must precede it or a 200 HTML page masks a failed drop assertion.
+    fixture_routes = [route for route in web_server.app.router.routes
+                      if route.path.startswith("/__fixture/")]
+    web_server.app.router.routes[:] = fixture_routes + [route for route in web_server.app.router.routes
+                                                        if route not in fixture_routes]
+
     web_server._SESSION_TOKEN = secrets.token_urlsafe(32)
     web_server._GATEWAY_HEALTH_URL = None
     web_server.app.state.bound_host = "127.0.0.1"

@@ -12,9 +12,11 @@ async function openSaved(context, owner, sessionId) {
   const page = await context.newPage({ viewport: { width: 1440, height: 900 } });
   const frames = [];
   const allFrames = [];
+  const sockets = [];
   page.routeWebSocket('**/api/ws*', socket => socket.close());
   page.on('websocket', socket => {
     if (socket.url().includes('/api/pty?')) {
+      sockets.push(socket);
       socket.on('framereceived', frame => {
         frames.push(String(frame.payload));
         allFrames.push(String(frame.payload));
@@ -38,7 +40,7 @@ async function openSaved(context, owner, sessionId) {
   const savedAnswer = sessionId === 'candidate-other' ? 'other saved answer' : `${owner} saved answer`;
   await expect.poll(() => frames.join('')).toContain(savedAnswer);
   await expect.poll(() => frames.join('')).toContain('fixture ready>');
-  return { page, frames, allFrames, terminal };
+  return { page, frames, allFrames, sockets, terminal };
 }
 
 async function sendTurn(view, text, replyNumber, assertStreaming = false) {
@@ -89,6 +91,18 @@ try {
 
   const candidate = await openSaved(candidateContext, 'candidate', 'candidate-saved');
   await sendTurn(candidate, 'candidate turn one', 2, true);
+  const socketsBeforeDrop = candidate.sockets.length;
+  assert.ok(socketsBeforeDrop > 0, 'no candidate PTY socket was tracked');
+  const drop = await candidateContext.request.post(`${base}/__fixture/drop-pty`);
+  assert.equal(drop.status(), 200);
+  const droppedPty = await drop.json();
+  await expect.poll(() => candidate.sockets.length).toBeGreaterThan(socketsBeforeDrop);
+  await expect(candidate.terminal.getByRole('textbox', { name: 'Terminal input' })).toBeVisible();
+  await sendTurn(candidate, 'candidate after reconnect', 3);
+  const resumedIdentity = await candidateContext.request.get(`${base}/__fixture/pty-identity`);
+  assert.equal(resumedIdentity.status(), 200);
+  assert.deepEqual(await resumedIdentity.json(), { ...droppedPty, attached: true },
+    'the reconnect spawned a replacement PTY');
 
   const otherContext = await browser.newContext();
   await otherContext.addCookies([{ name: 'hermes-handoff-owner', value: 'candidate', url: base }]);
