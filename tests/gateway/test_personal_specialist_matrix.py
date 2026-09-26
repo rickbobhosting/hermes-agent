@@ -11,7 +11,8 @@ import pytest
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.personal_specialist_matrix import (
-    InvocationClient, InvocationUnavailable, MatrixPersonalRouter, build_opt_in_router, event_key,
+    ActivationState, InvocationClient, InvocationUnavailable, MatrixPersonalRouter,
+    build_opt_in_router, event_key,
 )
 from gateway.personal_specialist_routing import BindingStore, Conversation, Router, Rules
 from gateway.platforms.event import MessageEvent, MessageType
@@ -50,6 +51,12 @@ def _dispatcher(tmp_path, *, default=None):
     return MatrixPersonalRouter(Router(rules, BindingStore(tmp_path / "bindings.db")), client, ACCOUNT), client
 
 
+def _activation(path, profiles=("geo",)):
+    path.write_text(json.dumps({"version": 1, "enabled_profiles": list(profiles)}))
+    path.chmod(0o600)
+    return path
+
+
 @pytest.mark.asyncio
 async def test_exact_selector_invokes_and_continues_only_the_same_room_thread_sender(tmp_path):
     dispatch, client = _dispatcher(tmp_path)
@@ -73,6 +80,28 @@ async def test_exact_selector_invokes_and_continues_only_the_same_room_thread_se
     ):
         assert await dispatch.handle(different, fallback) == "Orchestra"
     assert len(fallback_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_activation_file_enables_one_profile_without_gateway_restart(tmp_path):
+    dispatch, client = _dispatcher(tmp_path)
+    path = _activation(tmp_path / "active.json", ())
+    dispatch.activation = ActivationState(path)
+
+    async def fallback(_event):
+        return "Orchestra"
+
+    assert "not active" in await dispatch.handle(_event(), fallback)
+    assert not client.calls
+    _activation(path, ("geo",))
+    assert await dispatch.handle(_event(event_id="$event-b"), fallback) == "[geo]\nDone."
+    assert len(client.calls) == 1
+    _activation(path, ())
+    assert "not active" in await dispatch.handle(_event("continue", event_id="$event-c"), fallback)
+    assert len(client.calls) == 1
+    path.chmod(0o644)
+    assert "temporarily unavailable" in await dispatch.handle(_event(event_id="$event-d"), fallback)
+    assert len(client.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -269,7 +298,8 @@ def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
     (tmp_path / "rules.yaml").write_text(
         "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\nroom_defaults: []\nkeywords: {}\n")
-    settings = {"version": 1, "enabled": True, "rules_path": str(tmp_path / "rules.yaml")}
+    settings = {"version": 1, "enabled": True, "rules_path": str(tmp_path / "rules.yaml"),
+                "activation_path": str(_activation(tmp_path / "active.json"))}
     adapter = SimpleNamespace(_user_id=ACCOUNT, config=PlatformConfig(extra={"personal_routing": settings}))
     assert build_opt_in_router(adapter).client._base == "http://127.0.0.1:8789"
     settings["invocation_port"] = 18789
@@ -301,8 +331,10 @@ async def test_token_only_matrix_identity_routes_only_after_matching_whoami(tmp_
         "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
         "room_defaults: []\nkeywords: {}\n"
         "matrix_allowed_senders: {geo: ['@ricky:example.org']}\n")
+    activation = _activation(tmp_path / "active.json")
     adapter = SimpleNamespace(_user_id="", config=PlatformConfig(extra={
-        "personal_routing": {"version": 1, "enabled": True, "rules_path": str(rules_path)}}))
+        "personal_routing": {"version": 1, "enabled": True, "rules_path": str(rules_path),
+                             "activation_path": str(activation)}}))
     dispatch = build_opt_in_router(adapter)
     assert dispatch.account == ACCOUNT
     client = FakeClient()
@@ -345,9 +377,11 @@ def test_real_gateway_yaml_loader_keeps_personal_routing_profile_scoped(tmp_path
         (home / "rules.yaml").write_text(
             "version: 1\nowner_accounts: {matrix: '@orchestra:example.org'}\n"
             "room_defaults: []\nkeywords: {}\n")
+        _activation(home / "active.json")
     (homes[0] / "config.yaml").write_text(
         "matrix:\n  personal_routing:\n    version: 1\n    enabled: true\n"
-        f"    rules_path: {homes[0] / 'rules.yaml'}\n    invocation_port: 18789\n")
+        f"    rules_path: {homes[0] / 'rules.yaml'}\n"
+        f"    activation_path: {homes[0] / 'active.json'}\n    invocation_port: 18789\n")
     (homes[1] / "config.yaml").write_text(
         "matrix:\n  personal_routing:\n    version: 1\n    enabled: false\n")
     monkeypatch.setenv("HERMES_PERSONAL_INVOCATION_TOKEN", "test-only")

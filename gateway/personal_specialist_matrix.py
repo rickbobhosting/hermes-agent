@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import stat
 import time
 import urllib.error
 import urllib.parse
@@ -17,12 +19,43 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from gateway.personal_specialist_routing import BindingStore, Conversation, Router, Rules
+from gateway.personal_specialist_routing import BindingStore, Conversation, Router, Rules, _PERSONAL
 from gateway.platforms.event import MessageType
 
 
 class InvocationUnavailable(Exception):
     """A request could not be resolved to a successful durable invocation."""
+
+
+class ActivationState:
+    """Read an owner-only activation file on each routed event for per-profile handoff."""
+
+    def __init__(self, path: Path):
+        if not path.is_absolute():
+            raise ValueError("activation path must be absolute")
+        self.path = path
+
+    def enabled(self) -> frozenset[str]:
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise ValueError("activation file must be a private owner-owned regular file")
+            raw = os.read(fd, 16385)
+            if len(raw) > 16384:
+                raise ValueError("activation file is too large")
+        finally:
+            os.close(fd)
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or set(data) != {"version", "enabled_profiles"}
+                or type(data["version"]) is not int or data["version"] != 1):
+            raise ValueError("activation file requires version 1 and enabled_profiles")
+        profiles = data["enabled_profiles"]
+        if (not isinstance(profiles, list)
+                or not all(isinstance(profile, str) and profile in _PERSONAL for profile in profiles)
+                or len(profiles) != len(set(profiles))):
+            raise ValueError("activation profiles must be unique personal profile names")
+        return frozenset(profiles)
 
 
 # The API permits 1 MiB of raw plain text. JSON escaping can expand control
@@ -126,11 +159,13 @@ def event_key(ctx: Conversation, event_id: str) -> str:
 
 class MatrixPersonalRouter:
     def __init__(self, router: Router, client: InvocationClient, account: str,
-                 account_getter: Callable[[], str] | None = None):
+                 account_getter: Callable[[], str] | None = None,
+                 activation: ActivationState | None = None):
         self.router = router
         self.client = client
         self.account = account
         self.account_getter = account_getter or (lambda: account)
+        self.activation = activation
 
     async def handle(self, event: Any, fallback: Callable[[Any], Awaitable[Any]]) -> Any:
         # Matrix whoami can replace the configured account during connect().
@@ -148,14 +183,22 @@ class MatrixPersonalRouter:
         decision = self.router.resolve(ctx, event.text)
         if decision.kind in {"ignore", "orchestra"}:
             return await fallback(event)
+        try:
+            enabled = self.activation.enabled() if self.activation else _PERSONAL
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+            return "Specialist routing is temporarily unavailable. Please retry later."
         if decision.kind == "suggest":
+            if decision.profile not in enabled:
+                return await fallback(event)
             return f"This may fit {decision.profile}. Reply with @{decision.profile} followed by your request."
         if decision.kind == "clarify":
-            names = ", ".join("@" + name for name in decision.choices)
+            names = ", ".join("@" + name for name in decision.choices if name in enabled)
             return f"Choose a personal specialist with an exact selector: {names}." if names else (
                 "The saved specialist is unavailable; choose an exact @profile selector.")
         if decision.kind != "invoke" or not decision.profile or not decision.prompt:
             raise InvocationUnavailable("invalid specialist route")
+        if decision.profile not in enabled:
+            return "The selected specialist is not active under Orchestra yet."
         # The Matrix adapter has authorized this sender for Orchestra, but a
         # specialist may have a narrower existing allowlist. An absent policy
         # fails closed for that specialist, including saved bindings/defaults.
@@ -198,6 +241,11 @@ def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
         raise ValueError("personal routing Matrix owner does not match this adapter")
     if not get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", ""):
         raise ValueError("personal routing needs Orchestra invocation credential")
+    activation_raw = settings.get("activation_path")
+    if not isinstance(activation_raw, str) or not activation_raw or not Path(activation_raw).is_absolute():
+        raise ValueError("personal routing needs an absolute activation path")
+    activation = ActivationState(Path(activation_raw))
+    activation.enabled()
     port = settings.get("invocation_port", 8789)
     if type(port) is not int:
         raise ValueError("personal routing needs a valid loopback invocation port")
@@ -212,4 +260,5 @@ def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
     return MatrixPersonalRouter(
         Router(rules, bindings), client, account,
         account_getter=lambda: str(getattr(adapter, "_user_id", "")),
+        activation=activation,
     )

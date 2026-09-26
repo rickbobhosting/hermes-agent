@@ -10,6 +10,7 @@ matrix:
     version: 1
     enabled: true
     rules_path: /absolute/path/to/personal-specialist-routing.v1.yaml
+    activation_path: /absolute/path/to/personal-specialist-active.v1.json
     invocation_port: 8789
 ```
 
@@ -29,6 +30,13 @@ events use the existing Matrix handler until the authenticated account matches
 it. A configured account that contradicts the rules fails startup.
 The client bypasses process proxy settings and HTTP redirects so its bearer
 and prompt stay on `127.0.0.1`.
+
+The required owner-only activation file is reread for each selected
+specialist turn. Start with `{"version":1,"enabled_profiles":[]}`. Add one
+allowlisted profile only after its old gateway has stopped and Orchestra
+exclusively owns the reply room; removing it blocks new invocations without a
+gateway restart. A missing, malformed, or permission-weakened file fails
+closed.
 
 The adapter still owns Matrix authorization, mention/room policy, event dedup,
 threading, and reply delivery. Routing is installed only on a standalone
