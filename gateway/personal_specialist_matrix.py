@@ -25,7 +25,14 @@ class InvocationUnavailable(Exception):
     """A request could not be resolved to a successful durable invocation."""
 
 
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# The API permits 1 MiB of raw plain text. JSON escaping can expand control
+# characters sixfold before the record envelope is added.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
 
 
 class InvocationClient:
@@ -36,6 +43,7 @@ class InvocationClient:
             raise ValueError("invalid loopback invocation port")
         self._token_reader = token_reader
         self._base = f"http://127.0.0.1:{port}"
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict | None:
         token = self._token_reader()
@@ -51,7 +59,7 @@ class InvocationClient:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self._base + path, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with self._opener.open(request, timeout=15) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             if method == "GET" and exc.code == 404:
@@ -117,12 +125,18 @@ def event_key(ctx: Conversation, event_id: str) -> str:
 
 
 class MatrixPersonalRouter:
-    def __init__(self, router: Router, client: InvocationClient, account: str):
+    def __init__(self, router: Router, client: InvocationClient, account: str,
+                 account_getter: Callable[[], str] | None = None):
         self.router = router
         self.client = client
         self.account = account
+        self.account_getter = account_getter or (lambda: account)
 
     async def handle(self, event: Any, fallback: Callable[[Any], Awaitable[Any]]) -> Any:
+        # Matrix whoami can replace the configured account during connect().
+        # Route only while the authenticated adapter still owns the exact rule.
+        if self.account_getter() != self.account:
+            return await fallback(event)
         if (event.message_type != MessageType.TEXT or not event.source
                 or not isinstance(event.text, str)):
             return await fallback(event)
@@ -172,4 +186,7 @@ def build_opt_in_router(adapter: Any) -> MatrixPersonalRouter | None:
     home = Path(get_hermes_home())
     bindings = BindingStore(home / "state" / "personal-specialist-bindings.sqlite3")
     client = InvocationClient(lambda: str(get_scoped_secret("HERMES_PERSONAL_INVOCATION_TOKEN", "")))
-    return MatrixPersonalRouter(Router(rules, bindings), client, account)
+    return MatrixPersonalRouter(
+        Router(rules, bindings), client, account,
+        account_getter=lambda: str(getattr(adapter, "_user_id", "")),
+    )

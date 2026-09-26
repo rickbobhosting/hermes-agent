@@ -110,6 +110,19 @@ async def test_api_failure_preserves_binding_and_does_not_fall_back_to_orchestra
 
 
 @pytest.mark.asyncio
+async def test_authenticated_matrix_account_change_fails_closed(tmp_path):
+    dispatch, client = _dispatcher(tmp_path)
+    authenticated = {"account": ACCOUNT}
+    dispatch.account_getter = lambda: authenticated["account"]
+    async def fallback(_event):
+        return "Orchestra"
+    assert await dispatch.handle(_event(), fallback) == "[geo]\nDone."
+    authenticated["account"] = "@unexpected:example.org"
+    assert await dispatch.handle(_event(event_id="$event-b"), fallback) == "Orchestra"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_client_reuses_durable_event_and_polls_without_a_second_submit(monkeypatch):
     client = InvocationClient(lambda: "test-bearer")
     calls = []
@@ -190,9 +203,39 @@ def test_client_accepts_valid_maximum_result_with_json_envelope(monkeypatch):
         def __exit__(self, *_args):
             self.close()
 
-    monkeypatch.setattr("gateway.personal_specialist_matrix.urllib.request.urlopen",
-                        lambda *_args, **_kwargs: Response(payload))
+    monkeypatch.setattr(client._opener, "open", lambda *_args, **_kwargs: Response(payload))
     assert client._request("GET", "/v1/invocations/invoke-id") == record
+
+
+def test_client_accepts_json_escaped_control_text_at_api_limit(monkeypatch):
+    client = InvocationClient(lambda: "test-bearer")
+    record = {"id": "invoke-id", "profile": "geo", "status": "succeeded",
+              "session_id": "actual-session", "result": {"text": "\u0001" * (1024 * 1024)}}
+    payload = json.dumps(record, ensure_ascii=False).encode()
+    assert 6 * 1024 * 1024 < len(payload) < 8 * 1024 * 1024
+
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(client._opener, "open", lambda *_args, **_kwargs: Response(payload))
+    assert client._request("GET", "/v1/invocations/invoke-id") == record
+
+
+def test_client_disables_process_proxy_and_redirects(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:8888")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.example.invalid:8888")
+    monkeypatch.setenv("NO_PROXY", "")
+    client = InvocationClient(lambda: "test-bearer")
+    handlers = client._opener.handlers
+    assert not any(isinstance(handler, __import__("urllib.request").request.ProxyHandler)
+                   for handler in handlers)
+    assert any(isinstance(handler, __import__("urllib.request").request.HTTPRedirectHandler)
+               and handler.redirect_request(None, None, 302, "", {}, "https://example.invalid") is None
+               for handler in handlers)
 
 
 def test_opt_in_requires_exact_receiving_owner_and_bearer(tmp_path, monkeypatch):
