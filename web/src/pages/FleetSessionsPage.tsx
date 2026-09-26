@@ -39,8 +39,8 @@ export default function FleetSessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const detailRequest = useRef(0);
   const listRequest = useRef(0);
-  const timelinePageInFlight = useRef<string | null>(null);
-  const messagePageInFlight = useRef<string | null>(null);
+  const timelinePageInFlight = useRef<object | null>(null);
+  const messagePageInFlight = useRef<object | null>(null);
 
   const load = useCallback(async () => {
     const request = ++listRequest.current;
@@ -136,9 +136,9 @@ export default function FleetSessionsPage() {
   const loadMoreMessages = async (sessionId: string) => {
     const request = detailRequest.current;
     const offset = messages.length;
-    const key = `${target}\0${sessionId}\0${offset}`;
+    const requestLock = {};
     if (messagePageInFlight.current || !hasMoreMessages || activePrompt !== null) return;
-    messagePageInFlight.current = key;
+    messagePageInFlight.current = requestLock;
     setError(null);
     try {
       const page = await api.getFleetSessionMessages(target, sessionId, offset, MESSAGE_PAGE_SIZE);
@@ -149,16 +149,16 @@ export default function FleetSessionsPage() {
       if (request !== detailRequest.current) return;
       setError(cause instanceof Error ? cause.message : "Unable to load more messages.");
     } finally {
-      if (messagePageInFlight.current === key) messagePageInFlight.current = null;
+      if (messagePageInFlight.current === requestLock) messagePageInFlight.current = null;
     }
   };
 
   const loadMorePrompts = async (sessionId: string) => {
     const cursor = timeline?.pagination.next_cursor;
     if (cursor == null) return;
-    const key = `${target}\0${sessionId}\0${cursor}`;
+    const requestLock = {};
     if (timelinePageInFlight.current) return;
-    timelinePageInFlight.current = key;
+    timelinePageInFlight.current = requestLock;
     const request = detailRequest.current;
     setError(null);
     try {
@@ -176,7 +176,7 @@ export default function FleetSessionsPage() {
       if (request !== detailRequest.current) return;
       setError(cause instanceof Error ? cause.message : "Unable to load more prompts.");
     } finally {
-      if (timelinePageInFlight.current === key) timelinePageInFlight.current = null;
+      if (timelinePageInFlight.current === requestLock) timelinePageInFlight.current = null;
     }
   };
 

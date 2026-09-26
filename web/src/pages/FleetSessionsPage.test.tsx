@@ -109,4 +109,45 @@ describe("fleet session reader", () => {
     expect(await screen.findByRole("button", { name: "Jump to prompt: Second prompt" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Jump to prompt: Second prompt" })).toHaveLength(1);
   });
+
+  it("keeps a reopened session's message-page lock when an older request settles", async () => {
+    let resolveOld!: (value: unknown) => void;
+    let resolveCurrent!: (value: unknown) => void;
+    const oldPage = new Promise((resolve) => { resolveOld = resolve; });
+    const currentPage = new Promise((resolve) => { resolveCurrent = resolve; });
+    const firstPage = { messages: Array.from({ length: 120 }, (_, index) => ({
+      role: "user", content: `first ${index}`,
+    })) };
+    apiMocks.getFleetSessions.mockResolvedValue({ sessions: [session], total: 1 });
+    apiMocks.getFleetSessionDetail.mockResolvedValue(session);
+    apiMocks.getFleetSessionTimeline.mockResolvedValue({ entries: [], pagination: { has_more: false, next_cursor: null } });
+    apiMocks.getFleetSessionMessages
+      .mockResolvedValueOnce(firstPage)
+      .mockReturnValueOnce(oldPage)
+      .mockResolvedValueOnce(firstPage)
+      .mockReturnValueOnce(currentPage);
+
+    render(<ProfileContext.Provider value={{
+      profile: "fleet:infra", currentProfile: "default", ready: true,
+      profiles: ["default", "fleet:infra"], targets: [target], selectedTarget: target,
+      access: "inspect", canManage: false, canExecute: false, setProfile: vi.fn(),
+    }}><FleetSessionsPage /></ProfileContext.Provider>);
+
+    fireEvent.click(await screen.findByText("Deployment review"));
+    expect(await screen.findByRole("button", { name: "More messages" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "More messages" }));
+    fireEvent.click(screen.getByText("Deployment review"));
+    fireEvent.click(screen.getByText("Deployment review"));
+    expect(await screen.findByRole("button", { name: "More messages" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "More messages" }));
+    expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledTimes(4);
+
+    resolveOld({ messages: [{ role: "assistant", content: "stale page" }] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.click(screen.getByRole("button", { name: "More messages" }));
+    expect(apiMocks.getFleetSessionMessages).toHaveBeenCalledTimes(4);
+    resolveCurrent({ messages: [{ role: "assistant", content: "current page" }] });
+    expect(await screen.findByText("current page")).toBeTruthy();
+    expect(screen.queryByText("stale page")).toBeNull();
+  });
 });
