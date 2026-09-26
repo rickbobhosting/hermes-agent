@@ -15,6 +15,8 @@ sibling sites fixed in the same sweep:
 - Codex/Responses transport: ultra → max for EVERY model, not just gpt-5.6.
 """
 
+import pytest
+
 from agent.transports import get_transport
 import agent.transports.chat_completions  # noqa: F401
 import agent.transports.codex  # noqa: F401
@@ -128,3 +130,54 @@ class TestCodexUltraForEveryModel:
                 reasoning_config={"enabled": True, "effort": "ultra"},
             )
             assert kw["reasoning"]["effort"] == wire, model
+
+    @pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6-sol"])
+    def test_gpt6_max_only_on_official_api_origin(self, model):
+        transport = get_transport("codex_responses")
+        common = {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+            "reasoning_config": {"enabled": True, "effort": "max"},
+        }
+        official = transport.build_kwargs(**common, provider="openai", base_url="https://api.openai.com/v1")
+        assert official["model"] == model
+        assert official["reasoning"]["effort"] == "max"
+        for route in (
+            {"provider": "openai-codex", "base_url": "https://chatgpt.com/backend-api/codex", "is_codex_backend": True},
+            {"provider": "openai-codex", "base_url": "https://api.openai.com/v1", "is_codex_backend": True},
+            {"base_url": "https://api.openai.com.example/v1"},
+        ):
+            other = transport.build_kwargs(**common, **route)
+            assert other["reasoning"]["effort"] == "xhigh"
+            overridden_reasoning = transport.build_kwargs(
+                **common,
+                **route,
+                request_overrides={"reasoning": {"effort": "max", "summary": "auto"}},
+            )
+            assert overridden_reasoning["reasoning"]["effort"] == "xhigh"
+
+        overridden = transport.build_kwargs(
+            **common,
+            provider="openai",
+            base_url="https://api.openai.com/v1",
+            request_overrides={"model": "gpt-5.5"},
+        )
+        assert overridden["model"] == "gpt-5.5"
+        assert overridden["reasoning"]["effort"] == "xhigh"
+
+    def test_unverified_gpt6_route_caps_declared_profile_max(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.transports.codex._profile_declared_efforts",
+            lambda *_args: ("none", "low", "medium", "high", "xhigh", "max"),
+        )
+        kwargs = get_transport("codex_responses").build_kwargs(
+            model="gpt-6-luna",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            is_codex_backend=True,
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+        assert kwargs["reasoning"]["effort"] == "xhigh"

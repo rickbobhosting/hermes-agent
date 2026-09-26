@@ -173,6 +173,15 @@ class TestCodexVocabulary:
         assert clamp_effort("max", supported) == "max"
         assert clamp_effort("ultra", supported) == "max"
 
+    @pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6-sol", "openai/gpt-6-luna"])
+    def test_gpt6_sol_luna_support_documented_max(self, model):
+        from agent.reasoning_effort import CODEX_GPT6_SOL_LUNA_EFFORTS, codex_supported_efforts
+
+        supported = codex_supported_efforts(model)
+        assert supported is CODEX_GPT6_SOL_LUNA_EFFORTS
+        assert clamp_effort("max", supported) == "max"
+        assert clamp_effort("ultra", supported) == "max"
+
 
 class TestRequestedEffort:
     def test_extracts_effort(self):

@@ -27,14 +27,17 @@ EFFORT_LADDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "x
 #: Widest OpenAI-compatible wire vocabulary (OpenRouter, Nous Portal).
 OPENAI_COMPAT_WIRE_EFFORTS: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
-#: OpenAI/Codex Responses per model generation (live-verified): ``minimal`` is rejected by
-#: both (clamps to low); ``max`` is gpt-5.6-only.
+#: OpenAI/Codex Responses per model generation. ``minimal`` is rejected by
+#: these declared sets (clamps to low). GPT-6 Sol/Luna's public API vocabulary
+#: is documented by OpenAI; the Codex OAuth backend remains separately gated.
 CODEX_GPT56_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+CODEX_GPT6_SOL_LUNA_EFFORTS: tuple[str, ...] = CODEX_GPT56_EFFORTS
 CODEX_LEGACY_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh")
 # GPT-6 Astra is account-gated and its Responses API accepts no disable/minimal
 # wire level; callers normalize those requests to ``low`` at the transport boundary.
 CODEX_ASTRA_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 ASTRA_MODEL_IDS: frozenset[str] = frozenset({"gpt-6-astra", "gpt-6-astra-900k"})
+GPT6_SOL_LUNA_MODEL_IDS: frozenset[str] = frozenset({"gpt-6-sol", "gpt-6-luna"})
 DAYBREAK_MODEL_IDS: frozenset[str] = frozenset(
     {"gpt-daybreak-blue-latest", "gpt-daybreak-blue-latest-900k"}
 )
@@ -92,10 +95,17 @@ def is_astra_model(model: Optional[str]) -> bool:
     return (model or "").strip().lower().rsplit("/", 1)[-1] in ASTRA_MODEL_IDS
 
 
+def is_gpt6_sol_luna_model(model: Optional[str]) -> bool:
+    """Match only the documented GPT-6 Sol/Luna base slugs, including a vendor prefix."""
+    return (model or "").strip().lower().rsplit("/", 1)[-1] in GPT6_SOL_LUNA_MODEL_IDS
+
+
 def codex_supported_efforts(model: Optional[str]) -> tuple[str, ...]:
     """Supported effort set for an OpenAI/Codex Responses model."""
     if is_astra_model(model):
         return CODEX_ASTRA_EFFORTS
+    if is_gpt6_sol_luna_model(model):
+        return CODEX_GPT6_SOL_LUNA_EFFORTS
     bare = (model or "").strip().lower().rsplit("/", 1)[-1]
     return (
         CODEX_GPT56_EFFORTS

@@ -38,6 +38,39 @@ def test_explicit_astra_resolves_and_uses_official_responses(monkeypatch, tmp_pa
     assert kwargs["reasoning"]["effort"] == "low"  # Astra has no ``none`` wire level
 
 
+@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6-sol"])
+def test_explicit_gpt6_sol_luna_uses_official_responses_max(monkeypatch, tmp_path, model):
+    """The one-shot agent's direct API route preserves documented max on the wire."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda *args, **kwargs: {})
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda *args, **kwargs: [])
+
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        model=model,
+        provider="openai",
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+        platform="cli",
+        max_iterations=2,
+        quiet_mode=True,
+        skip_memory=True,
+    )
+    assert agent.api_mode == "codex_responses"
+    kwargs = agent._get_transport().build_kwargs(
+        model=agent.model,
+        messages=[{"role": "user", "content": "Hi"}],
+        tools=[],
+        provider=agent.provider,
+        base_url=agent.base_url,
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert kwargs["model"] == model
+    assert kwargs["reasoning"]["effort"] == "max"
+
+
 def test_astra_codex_oauth_fallback_uses_backend_context_limit():
     """OAuth keeps the Codex backend's 272K fallback; direct API metadata remains 1.05M."""
     from agent.model_metadata import (

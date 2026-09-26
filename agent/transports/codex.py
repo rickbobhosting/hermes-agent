@@ -13,9 +13,7 @@ from typing import Any, Callable, Optional
 from agent.reasoning_effort import (
     CODEX_ASTRA_EFFORTS, CODEX_LEGACY_EFFORTS,
     XAI_GROK46_EFFORTS, XAI_LEGACY_EFFORTS, clamp_effort, is_astra_model,
-    # Same declared vocabulary + shared clamp as the main Codex transport (agent.reasoning_effort):
-    # per-model — "max" is gpt-5.6-only, "minimal"/"ultra" always rejected (live-verified, #68365).
-    codex_supported_efforts,
+    is_gpt6_sol_luna_model, codex_supported_efforts,
 )
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
@@ -266,20 +264,52 @@ def _default_prompt_cache_retention_for_request(model: str, base_url: Any) -> Op
 def _is_official_openai_responses_route(model: Any, base_url: Any) -> bool:
     """Astra on the canonical API origin only — exact host, so a Responses-compatible proxy or a
     lookalike subdomain keeps the generic contract."""
-    if not is_astra_model(model):
-        return False
+    return is_astra_model(model) and _is_official_openai_api_origin(base_url)
+
+
+def _is_official_openai_api_origin(base_url: Any) -> bool:
     from utils import base_url_hostname
 
     return base_url_hostname(str(base_url or "")).lower() == "api.openai.com"
 
 
 def _codex_efforts_for_route(model: Any, base_url: Any, *, is_codex_backend: bool = False) -> tuple[str, ...]:
-    """Keep Astra's new vocabulary off unrelated Responses-compatible endpoints."""
+    """Keep documented GPT-6 API vocabularies off unrelated compatible endpoints."""
     if is_astra_model(model) and not (
         is_codex_backend or _is_official_openai_responses_route(model, base_url)
     ):
         return CODEX_LEGACY_EFFORTS
+    if is_gpt6_sol_luna_model(model) and (
+        is_codex_backend or not _is_official_openai_api_origin(base_url)
+    ):
+        # The public API docs do not establish the ChatGPT Codex OAuth or
+        # third-party compatible endpoint vocabulary. Do not enable max there
+        # until an actual outbound request on that route has been verified.
+        return CODEX_LEGACY_EFFORTS
     return codex_supported_efforts(str(model or ""))
+
+
+def _cap_unverified_gpt6_effort(
+    kwargs: dict[str, Any], model: Any, base_url: Any, *, is_codex_backend: bool = False,
+) -> None:
+    """Keep unverified GPT-6 Sol/Luna compatible routes below the new max tier.
+
+    This runs after request overrides so neither a declared provider profile
+    nor an override can silently enable max on Codex OAuth or a proxy. Only
+    direct, non-OAuth requests to the official API origin use the documented
+    full vocabulary.
+    """
+    if not is_gpt6_sol_luna_model(model) or (
+        not is_codex_backend and _is_official_openai_api_origin(base_url)
+    ):
+        return
+    reasoning = kwargs.get("reasoning")
+    if not isinstance(reasoning, dict) or not reasoning.get("effort"):
+        return
+    kwargs["reasoning"] = {
+        **reasoning,
+        "effort": clamp_effort(reasoning["effort"], CODEX_LEGACY_EFFORTS),
+    }
 
 
 def _sanitize_astra_request_kwargs(kwargs: dict[str, Any], model: Any, base_url: Any) -> None:
@@ -578,14 +608,13 @@ class ResponsesApiTransport(ProviderTransport):
         context_management = params.get("context_management")
         native_compaction_active = _native_compaction_active(context_management)
 
-        reasoning_effort, reasoning_enabled = _resolve_reasoning(model, params)
-        response_tools, self._last_wire_aliases = _alias_wire_tools(self.convert_tools(tools), params, is_xai_responses)
-
         # Lazy: provider plugins import this transport during model_metadata init.
         from agent.model_metadata import strip_codex_context_variant_suffix as _strip_ctx_variant
         request_overrides = params.get("request_overrides") or {}
         # An override may rewrite the wire model; provenance must be stamped with what actually goes out.
         wire_model = _strip_ctx_variant(request_overrides.get("model", model))
+        reasoning_effort, reasoning_enabled = _resolve_reasoning(wire_model, params)
+        response_tools, self._last_wire_aliases = _alias_wire_tools(self.convert_tools(tools), params, is_xai_responses)
         kwargs = {
             # ``-900k`` picker variants are Hermes-side aliases; the backend knows only the base slug.
             "model": wire_model,
@@ -627,7 +656,10 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs.update(request_overrides)
             kwargs["model"] = wire_model
 
-        _sanitize_astra_request_kwargs(kwargs, model, params.get("base_url"))
+        _sanitize_astra_request_kwargs(kwargs, wire_model, params.get("base_url"))
+        _cap_unverified_gpt6_effort(
+            kwargs, wire_model, params.get("base_url"), is_codex_backend=is_codex_backend,
+        )
 
         _bound_prompt_cache_key_field(kwargs)
 
