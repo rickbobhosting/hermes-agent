@@ -285,6 +285,14 @@ afterEach(async () => {
 
 describe("ChatPage", () => {
   it("keeps the live PTY identity when a rendered saved-session row is picked", async () => {
+    let generatedTokens = 0;
+    vi.stubGlobal("crypto", {
+      getRandomValues: (values: Uint8Array) => {
+        values.fill(++generatedTokens);
+        return values;
+      },
+      randomUUID: () => "chat-test-id",
+    });
     apiMocks.getSessions.mockResolvedValue({ sessions: [{
       id: "saved-1", title: "Saved chat row", preview: null,
       last_active: Date.now() / 1000, started_at: Date.now() / 1000,
@@ -320,6 +328,7 @@ describe("ChatPage", () => {
         .find((button) => button.textContent === "Back to chat"))?.click();
     });
     expect(container.querySelector("[data-testid='chat-location']")?.textContent).toBe("");
+    const callsBeforePick = apiMocks.buildWsUrl.mock.calls.length;
     const savedRow = Array.from(container.querySelectorAll("span"))
       .find((span) => span.textContent === "Saved chat row");
     expect(savedRow).toBeTruthy();
@@ -331,6 +340,12 @@ describe("ChatPage", () => {
     });
     expect(container.querySelector("[data-testid='chat-location']")?.textContent)
       .toBe("?resume=saved-1");
+    await vi.waitFor(() => expect(apiMocks.buildWsUrl.mock.calls.length)
+      .toBeGreaterThan(callsBeforePick));
+    const pickedCall = apiMocks.buildWsUrl.mock.calls.at(-1)?.[1];
+    expect(pickedCall?.resume).toBe("saved-1");
+    expect(pickedCall?.attach).toBe(token);
+    expect(generatedTokens).toBe(1);
     const tokens = apiMocks.buildWsUrl.mock.calls.map((call) => call[1]?.attach);
     expect(tokens.length).toBeGreaterThanOrEqual(2);
     expect(new Set(tokens)).toEqual(new Set([token]));
