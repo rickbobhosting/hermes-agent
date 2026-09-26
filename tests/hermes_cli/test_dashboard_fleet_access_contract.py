@@ -58,6 +58,22 @@ def test_inspect_reads_only_registered_session_and_rejects_unknown(fleet):
     assert not (target / "SOUL.md").exists()
 
 
+def test_inspect_analytics_stays_in_registered_session_store(fleet):
+    client, target, sibling, _ = fleet
+    target_db = target / "state.db"
+    before = target_db.stat().st_mtime_ns
+    usage = client.get("/api/analytics/usage?profile=fleet:target&days=30")
+    assert usage.status_code == 200, usage.text
+    assert usage.json()["totals"]["total_sessions"] == 1
+    models = client.get("/api/analytics/models?profile=fleet:target&days=30")
+    assert models.status_code == 200, models.text
+    assert models.json()["totals"]["total_sessions"] == 0
+    assert client.get("/api/analytics/usage?profile=fleet:sibling").status_code == 404
+    assert client.get("/api/analytics/models?profile=fleet:sibling").status_code == 404
+    assert target_db.stat().st_mtime_ns == before
+    assert (sibling / "state.db").is_file()
+
+
 def test_manage_write_and_selector_conflicts(fleet):
     client, target, sibling, set_access = fleet
     url = "/api/profiles/fleet%3Atarget/soul"

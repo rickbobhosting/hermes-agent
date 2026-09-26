@@ -71,6 +71,8 @@ def test_rendered_chat_keeps_named_profile_session_and_history(tmp_path, monkeyp
     (profile_home / "config.yaml").write_text("{}\n", encoding="utf-8")
     if fleet:
         import yaml
+        (profile_home / "config.yaml").write_text(
+            "dashboard:\n  show_token_analytics: true\n", encoding="utf-8")
         inspect_home = tmp_path / "external-readonly"
         inspect_home.mkdir()
         (inspect_home / "config.yaml").write_text("display:\n  streaming: false\n", encoding="utf-8")

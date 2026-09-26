@@ -14,6 +14,9 @@ vi.mock("@/contexts/useProfileScope", () => ({
 vi.mock("@/pages/ConfigPage", () => ({
   default: () => <div>Built-in scoped config</div>,
 }));
+vi.mock("@/pages/AnalyticsPage", () => ({
+  default: () => <div>Built-in scoped analytics</div>,
+}));
 
 import { FleetRouteGuard } from "./App";
 
@@ -28,5 +31,15 @@ describe("fleet route overrides", () => {
     </Suspense>);
     expect(await screen.findByText("Built-in scoped config")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Host plugin config action" })).toBeNull();
+  });
+
+  it("renders the built-in analytics page even when a plugin supplies the route element", async () => {
+    render(<Suspense fallback={<div>Loading analytics</div>}>
+      <FleetRouteGuard path="/analytics">
+        <button>Host plugin analytics action</button>
+      </FleetRouteGuard>
+    </Suspense>);
+    expect(await screen.findByText("Built-in scoped analytics")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Host plugin analytics action" })).toBeNull();
   });
 });

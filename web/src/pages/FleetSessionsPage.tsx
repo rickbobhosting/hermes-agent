@@ -213,7 +213,10 @@ export default function FleetSessionsPage() {
       <div>
         <div className="flex items-center justify-between gap-3">
           <h1 className="text-xl font-semibold">Fleet sessions · {selectedTarget?.display_name || selectedTarget?.name}</h1>
-          {canExecute && <Button outlined size="sm" onClick={() => openChat()}>New chat</Button>}
+          <div className="flex shrink-0 gap-2">
+            <Button outlined size="sm" onClick={() => navigate(`/analytics?profile=${encodeURIComponent(profile)}`)}>Analytics</Button>
+            {canExecute && <Button outlined size="sm" onClick={() => openChat()}>New chat</Button>}
+          </div>
         </div>
         <p className="text-sm text-muted-foreground">Session history from the selected external target.</p>
       </div>

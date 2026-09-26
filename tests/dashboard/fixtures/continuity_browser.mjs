@@ -103,6 +103,8 @@ try {
   await expect.poll(() => ptyFrames.join('')).toContain('fixture reply 4: browser after cancel');
   await expect(page.getByRole('heading', { name: 'Fixture continuity' })).toBeVisible();
   if (fleet) {
+    await page.goto(`${base}/analytics?profile=fleet%3Ainfra`, { waitUntil: 'domcontentloaded' });
+    await expect(page.getByText('Total Sessions')).toBeVisible();
     await page.goto(`${base}/config?profile=fleet%3Ainfra`, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('code').filter({ hasText: /external-infra\/config.yaml/ })).toBeVisible();
     await page.getByRole('button', { name: 'YAML', exact: true }).click();

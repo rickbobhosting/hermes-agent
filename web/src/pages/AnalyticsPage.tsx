@@ -24,6 +24,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@nous-research/ui/ui/c
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
+import { useProfileScope } from "@/contexts/useProfileScope";
 import { errorMessage } from "@/lib/api-error";
 
 const PERIODS = [
@@ -405,6 +406,8 @@ function SkillTable({ skills }: { skills: AnalyticsSkillEntry[] }) {
 }
 
 export default function AnalyticsPage() {
+  const { profile } = useProfileScope();
+  const isFleet = profile.startsWith("fleet:");
   const [days, setDays] = useState(30);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -484,7 +487,7 @@ export default function AnalyticsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <PluginSlot name="analytics:top" />
+      {!isFleet && <PluginSlot name="analytics:top" />}
 
       {showTokens === false && (
         <Card>
@@ -599,7 +602,7 @@ export default function AnalyticsPage() {
             </CardContent>
           </Card>
         )}
-      <PluginSlot name="analytics:bottom" />
+      {!isFleet && <PluginSlot name="analytics:bottom" />}
     </div>
   );
 }

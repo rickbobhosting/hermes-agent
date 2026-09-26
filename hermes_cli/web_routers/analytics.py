@@ -6,12 +6,15 @@ Extracted from ``hermes_cli.web_server``; app state and helpers are late-bound t
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.config import get_config_path, read_raw_config
+from hermes_cli.dashboard_fleet import is_fleet_selector
+from hermes_cli.dashboard_fleet_access import require_fleet_access
 from hermes_cli.web_deps import late
 from hermes_cli.web_routers._common import corrupt_store_as_status
 from hermes_cli.web_server_profiles import (
@@ -76,10 +79,29 @@ def _rows(db, sql: str, cutoff: float) -> List[Dict[str, Any]]:
     return [dict(r) for r in db._conn.execute(sql, (cutoff,)).fetchall()]
 
 
-def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
+def _analytics_db_path(profile: Optional[str]) -> Path:
+    """Resolve an external selector only for this read-only analytics surface."""
+    if is_fleet_selector(profile):
+        target = require_fleet_access(profile, "inspect")
+        path = target.home / "state.db"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Session store not found in selected fleet target.")
+        return path
+    return _session_db_path_for_profile(profile)
+
+
+def _analytics_db(profile: Optional[str], db_path: Path | None = None):
+    if is_fleet_selector(profile):
+        from hermes_state import SessionDB
+        return SessionDB(db_path=db_path or _analytics_db_path(profile), read_only=True)
+    return _open_session_db_for_profile(profile, read_only=True)
+
+
+def _get_usage_analytics(days: int = 30, profile: Optional[str] = None,
+                         db_path: Path | None = None):
     from agent.insights import InsightsEngine
 
-    db = _open_session_db_for_profile(profile, read_only=True)
+    db = _analytics_db(profile, db_path)
     try:
         cutoff = time.time() - (days * 86400)
         daily = _rows(db, """
@@ -149,8 +171,9 @@ async def get_usage_analytics(
     values would force expensive full-history SQL and InsightsEngine work, or
     produce empty/inverted time windows. The UI only offers 7/30/90-day
     presets."""
-    with corrupt_store_as_status(_session_db_path_for_profile(profile)):
-        return await asyncio.to_thread(_get_usage_analytics, days, profile)
+    db_path = _analytics_db_path(profile)
+    with corrupt_store_as_status(db_path):
+        return await asyncio.to_thread(_get_usage_analytics, days, profile, db_path)
 
 
 _USAGE_KEYS = (
@@ -228,9 +251,10 @@ _MODEL_CARD_KEYS = (
 )
 
 
-def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
+def _get_models_analytics(days: int = 30, profile: Optional[str] = None,
+                          db_path: Path | None = None):
     """Per-model token/cost/session breakdown plus models.dev capability metadata."""
-    db = _open_session_db_for_profile(profile, read_only=True)
+    db = _analytics_db(profile, db_path)
     try:
         cutoff = time.time() - (days * 86400)
 
@@ -308,5 +332,6 @@ async def get_models_analytics(
     profile: Optional[str] = None,
 ):
     """Return model analytics without blocking the serving event loop."""
-    with corrupt_store_as_status(_session_db_path_for_profile(profile)):
-        return await asyncio.to_thread(_get_models_analytics, days, profile)
+    db_path = _analytics_db_path(profile)
+    with corrupt_store_as_status(db_path):
+        return await asyncio.to_thread(_get_models_analytics, days, profile, db_path)

@@ -168,5 +168,7 @@ describe("fleet session reader", () => {
     expect(await screen.findByRole("button", { name: "Resume Deployment review" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Resume Deployment review" }));
     expect(screen.getByTestId("location").textContent).toBe("/chat?profile=fleet%3Ainfra&resume=session-1");
+    fireEvent.click(screen.getByRole("button", { name: "Analytics" }));
+    expect(screen.getByTestId("location").textContent).toBe("/analytics?profile=fleet%3Ainfra");
   });
 });
