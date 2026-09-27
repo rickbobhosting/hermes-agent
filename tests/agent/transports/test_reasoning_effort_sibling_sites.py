@@ -132,7 +132,7 @@ class TestCodexUltraForEveryModel:
             assert kw["reasoning"]["effort"] == wire, model
 
     @pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6-sol"])
-    def test_gpt6_max_only_on_official_api_origin(self, model):
+    def test_gpt6_max_only_on_verified_routes(self, model):
         transport = get_transport("codex_responses")
         common = {
             "model": model,
@@ -143,9 +143,14 @@ class TestCodexUltraForEveryModel:
         official = transport.build_kwargs(**common, provider="openai", base_url="https://api.openai.com/v1")
         assert official["model"] == model
         assert official["reasoning"]["effort"] == "max"
+        verified = transport.build_kwargs(
+            **common, provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex", is_codex_backend=True,
+        )
+        assert verified["reasoning"]["effort"] == ("max" if model == "gpt-6-luna" else "xhigh")
         for route in (
-            {"provider": "openai-codex", "base_url": "https://chatgpt.com/backend-api/codex", "is_codex_backend": True},
             {"provider": "openai-codex", "base_url": "https://api.openai.com/v1", "is_codex_backend": True},
+            {"provider": "openai-codex", "base_url": "https://chatgpt.com/backend-api/codex/v2", "is_codex_backend": True},
             {"base_url": "https://api.openai.com.example/v1"},
         ):
             other = transport.build_kwargs(**common, **route)
@@ -156,6 +161,13 @@ class TestCodexUltraForEveryModel:
                 request_overrides={"reasoning": {"effort": "max", "summary": "auto"}},
             )
             assert overridden_reasoning["reasoning"]["effort"] == "xhigh"
+
+        verified_override = transport.build_kwargs(
+            **common, provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex", is_codex_backend=True,
+            request_overrides={"reasoning": {"effort": "max", "summary": "auto"}},
+        )
+        assert verified_override["reasoning"]["effort"] == ("max" if model == "gpt-6-luna" else "xhigh")
 
         overridden = transport.build_kwargs(
             **common,
@@ -176,7 +188,7 @@ class TestCodexUltraForEveryModel:
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
             provider="openai-codex",
-            base_url="https://chatgpt.com/backend-api/codex",
+            base_url="https://chatgpt.com/backend-api/codex/v2",
             is_codex_backend=True,
             reasoning_config={"enabled": True, "effort": "max"},
         )

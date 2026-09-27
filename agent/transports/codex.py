@@ -273,6 +273,15 @@ def _is_official_openai_api_origin(base_url: Any) -> bool:
     return base_url_hostname(str(base_url or "")).lower() == "api.openai.com"
 
 
+def _is_verified_luna_codex_route(model: Any, base_url: Any, *, is_codex_backend: bool) -> bool:
+    """Exact OAuth route where a bounded live Luna/max request was accepted."""
+    return (
+        is_codex_backend
+        and str(model or "").strip().lower() == "gpt-6-luna"
+        and str(base_url or "").rstrip("/") == "https://chatgpt.com/backend-api/codex"
+    )
+
+
 def _codex_efforts_for_route(model: Any, base_url: Any, *, is_codex_backend: bool = False) -> tuple[str, ...]:
     """Keep documented GPT-6 API vocabularies off unrelated compatible endpoints."""
     if is_astra_model(model) and not (
@@ -281,10 +290,10 @@ def _codex_efforts_for_route(model: Any, base_url: Any, *, is_codex_backend: boo
         return CODEX_LEGACY_EFFORTS
     if is_gpt6_sol_luna_model(model) and (
         is_codex_backend or not _is_official_openai_api_origin(base_url)
-    ):
-        # The public API docs do not establish the ChatGPT Codex OAuth or
-        # third-party compatible endpoint vocabulary. Do not enable max there
-        # until an actual outbound request on that route has been verified.
+    ) and not _is_verified_luna_codex_route(model, base_url, is_codex_backend=is_codex_backend):
+        # The public API docs do not establish arbitrary Codex OAuth or
+        # third-party compatible endpoint vocabularies. Keep unverified routes
+        # capped; only the exact Luna route above has live max evidence.
         return CODEX_LEGACY_EFFORTS
     return codex_supported_efforts(str(model or ""))
 
@@ -299,7 +308,9 @@ def _cap_unverified_gpt6_effort(
     direct, non-OAuth requests to the official API origin use the documented
     full vocabulary.
     """
-    if not is_gpt6_sol_luna_model(model) or (
+    if not is_gpt6_sol_luna_model(model) or _is_verified_luna_codex_route(
+        model, base_url, is_codex_backend=is_codex_backend
+    ) or (
         not is_codex_backend and _is_official_openai_api_origin(base_url)
     ):
         return
