@@ -177,6 +177,35 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
                    lambda: _resolve_base_dir(task_id, container_paths=container_paths), container_paths)
 
 
+def _project_workspace_denial(filepath: str, task_id: str = "default") -> str | None:
+    """Confine a project profile's native file tools to its own workspace.
+
+    The project profile's memory and skill tools have their own stores. This
+    guard applies to the general file toolset, including absolute paths and
+    symlinks. Other Hermes profiles retain their existing file behavior.
+    """
+    from hermes_cli.profiles import get_active_profile_name
+
+    if not get_active_profile_name().startswith("project-"):
+        return None
+    denial = "Project file tools are confined to the profile workspace"
+    try:
+        from hermes_constants import get_hermes_home
+
+        if _uses_container_paths(task_id):
+            return denial
+        home = get_hermes_home().resolve()
+        workspace = (home / "workspace").resolve()
+        if not workspace.is_relative_to(home):
+            return denial
+        target = _resolve_path_for_task(filepath, task_id)
+        if not isinstance(target, Path) or not target.resolve().is_relative_to(workspace):
+            return denial
+    except (OSError, RuntimeError, ValueError):
+        return denial
+    return None
+
+
 
 def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "default") -> str | None:
     """Warn when a RELATIVE path resolved OUTSIDE the task's workspace root (the

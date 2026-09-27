@@ -26,7 +26,8 @@ from tools.file_operations_common import DEFAULT_READ_LIMIT
 from tools import file_state
 from agent.redact import _is_secret_file_arg, redact_sensitive_text
 from tools.file_tools_paths import (
-    _expand_tilde, _path_resolution_warning, _resolve_base_dir, _resolve_path_for_task)
+    _expand_tilde, _path_resolution_warning, _project_workspace_denial,
+    _resolve_base_dir, _resolve_path_for_task)
 from tools.file_tools_write_guards import (
     _READ_DEDUP_STATUS_MESSAGE, _check_approval_required_write, _check_binary_document_write,
     _check_cross_profile_path, _check_protected_instruction_write, _check_sensitive_path,
@@ -576,6 +577,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
     → document extraction → binary-extension guard → Hermes internal denylist
     → negative-result cache → dedup stub → real read.
     """
+    if denial := _project_workspace_denial(path, task_id):
+        return tool_error(denial)
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
@@ -817,6 +820,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     (unadvertised in the schema; the mirror rejection error teaches it — the
     cross-PROFILE guard it was named for no longer exists).
     """
+    if denial := _project_workspace_denial(path, task_id):
+        return tool_error(denial)
     # write_file checks the binary-document guard before the mirror guard.
     err = (_check_sensitive_path(path, task_id)
            or _check_binary_document_write(path, task_id)
@@ -919,6 +924,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             return collected
         _paths_to_check += collected[0]
         _content_write_paths += collected[1]
+    for target_path in _paths_to_check:
+        if denial := _project_workspace_denial(target_path, task_id):
+            return tool_error(denial)
     precheck_err = _write_precheck_error(_paths_to_check, _content_write_paths, task_id, cross_profile)
     if precheck_err:
         return tool_error(precheck_err)
@@ -993,6 +1001,8 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 order: str = "discovery",
                 task_id: str = "default") -> str:
     """Search for content or files."""
+    if denial := _project_workspace_denial(path, task_id):
+        return tool_error(denial)
     try:
         offset, limit = normalize_search_pagination(offset, limit)
 
