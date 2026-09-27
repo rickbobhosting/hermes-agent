@@ -57,11 +57,12 @@ async def _drain_background_tasks(adapter: WebhookAdapter) -> None:
 # ===================================================================
 
 class TestCronJobTrigger:
+    @pytest.mark.parametrize("route_name", ["meeting-lifecycle", "comms-intake"])
     @pytest.mark.asyncio
-    async def test_standalone_project_meeting_route_accepts_only_its_self_prefix(self):
+    async def test_standalone_project_route_accepts_only_its_self_prefix(self, route_name):
         """A named standalone home treats /p/self/ as its exact Project route."""
         adapter = _make_adapter({
-            "meeting-lifecycle": {
+            route_name: {
                 "profile": "project-fixture",
                 "secret": _INSECURE_NO_AUTH,
                 "cron_job": "project-meeting-lifecycle",
@@ -78,14 +79,14 @@ class TestCronJobTrigger:
             }),
         ):
             async with TestClient(TestServer(app)) as cli:
-                bare = await cli.post("/webhooks/meeting-lifecycle", data=body)
+                bare = await cli.post(f"/webhooks/{route_name}", data=body)
                 assert bare.status == 404
                 foreign = await cli.post(
-                    "/p/project-foreign/webhooks/meeting-lifecycle", data=body
+                    f"/p/project-foreign/webhooks/{route_name}", data=body
                 )
                 assert foreign.status == 404
                 own = await cli.post(
-                    "/p/project-fixture/webhooks/meeting-lifecycle", data=body
+                    f"/p/project-fixture/webhooks/{route_name}", data=body
                 )
                 assert own.status == 202
                 await _drain_background_tasks(adapter)
@@ -142,6 +143,43 @@ class TestCronJobTrigger:
                 await _drain_background_tasks(adapter)
         assert len(fired) == 2
         assert "Process b" in fired[1][1]
+
+    @pytest.mark.asyncio
+    async def test_serialized_comms_route_retries_while_prior_run_is_busy(self):
+        """Comms delivery can opt into the same retryable serialized cron admission."""
+        adapter = _make_adapter({
+            "comms-intake": {
+                "secret": _INSECURE_NO_AUTH,
+                "cron_job": "project-comms-intake",
+                "serialize_cron_job": True,
+                "prompt": "Process {source_ids}",
+            }
+        })
+        started = threading.Event()
+        release = threading.Event()
+
+        def _fake_execute(_job_ref, _extra_prompt=None):
+            started.set()
+            assert release.wait(5)
+            return {"claimed": True, "success": True, "error": None}
+
+        with patch("tools.cronjob_tools.execute_job_for_event", side_effect=_fake_execute):
+            async with TestClient(TestServer(_create_app(adapter))) as cli:
+                first = await cli.post(
+                    "/webhooks/comms-intake",
+                    json={"event_type": "email.ingested", "source_ids": ["email:a"]},
+                    headers={"X-Request-ID": "comms-a"},
+                )
+                assert first.status == 202
+                assert await asyncio.to_thread(started.wait, 2)
+                busy = await cli.post(
+                    "/webhooks/comms-intake",
+                    json={"event_type": "email.ingested", "source_ids": ["email:b"]},
+                    headers={"X-Request-ID": "comms-b"},
+                )
+                assert busy.status == 503
+                release.set()
+                await _drain_background_tasks(adapter)
 
     @pytest.mark.asyncio
     async def test_post_fires_job_with_event_context(self):

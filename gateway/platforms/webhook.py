@@ -189,7 +189,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # in-flight trigger per route/job so a burst is retried by the Hub's
         # durable delivery queue instead of being acknowledged then skipped by
         # cron's at-most-once fire claim.
-        self._meeting_cron_inflight: set[tuple[str, str, str]] = set()
+        self._serialized_cron_inflight: set[tuple[str, str, str]] = set()
         self._rate_limit: int = int(extra.get("rate_limit", 30))  # per minute
         self._max_body_bytes: int = int(extra.get("max_body_bytes", 1_048_576))  # 1MB
         self._script_timeout_seconds: int = int(extra.get("script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_SECONDS))
@@ -515,10 +515,10 @@ class WebhookAdapter(BasePlatformAdapter):
         job_ref = str(route_config["cron_job"])
         admission_key = (
             (route_name, profile or "default", job_ref)
-            if route_name == "meeting-lifecycle" else None
+            if route_config.get("serialize_cron_job", route_name == "meeting-lifecycle") else None
         )
         if admission_key is not None:
-            if admission_key in self._meeting_cron_inflight:
+            if admission_key in self._serialized_cron_inflight:
                 # _handle_webhook recorded this ID just before dispatch.
                 # Releasing it is essential: a later retry carries the same
                 # X-Request-ID and must be allowed to enter after the run.
@@ -528,7 +528,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     status=503,
                     headers={"Retry-After": "30"},
                 )
-            self._meeting_cron_inflight.add(admission_key)
+            self._serialized_cron_inflight.add(admission_key)
         event_context = (f"This run was triggered by webhook event '{event_type}' on route '{route_name}' "
                          f"(not the schedule).\n\n{prompt}")
         logger.info("[webhook] cron-trigger event=%s route=%s job=%s delivery=%s", event_type, route_name, job_ref,
@@ -549,13 +549,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.exception("[webhook] cron-trigger failed job=%s route=%s", job_ref, route_name)
             finally:
                 if admission_key is not None:
-                    self._meeting_cron_inflight.discard(admission_key)
+                    self._serialized_cron_inflight.discard(admission_key)
 
         try:
             task = asyncio.create_task(_fire_cron_job())
         except Exception:
             if admission_key is not None:
-                self._meeting_cron_inflight.discard(admission_key)
+                self._serialized_cron_inflight.discard(admission_key)
             self._seen_deliveries.pop(delivery_id, None)
             raise
         self._background_tasks.add(task)
@@ -575,16 +575,17 @@ class WebhookAdapter(BasePlatformAdapter):
             return route_name, None, profile, _json_error(f"Unknown route: {route_name}", 404)
         # A standalone named-profile gateway resolves its own /p/<name>/ prefix
         # to None because the launch home is already that profile. Keep an
-        # exactly named Project meeting route usable on that self prefix, while
+        # exactly named Project cron route usable on that self prefix, while
         # leaving bare/default and foreign-profile routes fail-closed.
         self_prefix = (request.match_info.get("profile") or "").strip()
-        standalone_project_meeting = (
-            route_name == "meeting-lifecycle"
+        standalone_project_cron = (
+            route_name in {"meeting-lifecycle", "comms-intake"}
+            and bool(route_config.get("cron_job"))
             and profile is None
             and self_prefix.startswith("project-")
             and route_config.get("profile") == self_prefix
         )
-        if not self._route_allows_profile(route_config, profile) and not standalone_project_meeting:
+        if not self._route_allows_profile(route_config, profile) and not standalone_project_cron:
             logger.warning("[webhook] Route %s is not authorized for profile %r", route_name, profile or "default")
             # Same as unknown-route so profile mismatches can't enumerate route bindings.
             return route_name, None, profile, _json_error(f"Unknown route: {route_name}", 404)
