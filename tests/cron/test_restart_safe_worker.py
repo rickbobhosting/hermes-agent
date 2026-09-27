@@ -159,6 +159,7 @@ def test_external_worker_adopts_execution_and_runs_payload_once(
     payload.write_text(
         json.dumps({
             "job": {"id": "job-1", "execution_id": "exec-1"},
+            "extra_prompt": "event=meeting.ended meeting_id=meeting-123",
             "profile_home": str(tmp_path / "profile"),
         }),
         encoding="utf-8",
@@ -185,6 +186,7 @@ def test_external_worker_adopts_execution_and_runs_payload_once(
     adopted.assert_called_once_with("exec-1")
     run.assert_called_once()
     assert run.call_args.args[0]["id"] == "job-1"
+    assert run.call_args.kwargs["extra_prompt"] == "event=meeting.ended meeting_id=meeting-123"
     expected_home = (tmp_path / "profile").resolve()
     assert observed_homes == [expected_home, expected_home]
     assert ack.exists()
@@ -329,7 +331,9 @@ def test_launch_external_worker_uses_restart_safe_scope_and_acknowledges(
 
     set_multiplex_active(True)
     try:
-        assert scheduler._launch_external_cron_worker(job) is True
+        assert scheduler._launch_external_cron_worker(
+            job, extra_prompt="event=meeting.ended meeting_id=meeting-123"
+        ) is True
     finally:
         clear_env_passthrough()
         set_multiplex_active(False)
@@ -341,6 +345,7 @@ def test_launch_external_worker_uses_restart_safe_scope_and_acknowledges(
     handoff.assert_called_once_with("exec-1")
     assert get.call_count == 2
     assert payloads[0]["multiplex_active"] is True
+    assert payloads[0]["extra_prompt"] == "event=meeting.ended meeting_id=meeting-123"
     # Once the attempt is terminal the parent reaps its own handoff artifacts.
     assert not (tmp_path / "cron/external-workers/exec-1.json").exists()
 
@@ -607,9 +612,11 @@ def test_shared_run_path_hands_gateway_fire_to_external_worker(monkeypatch):
     monkeypatch.setattr(scheduler, "run_job", run)
     job = {"id": "job-1", "execution_id": "exec-1"}
 
-    assert scheduler.run_one_job(job, adapters={"discord": object()}) is True
+    assert scheduler.run_one_job(
+        job, adapters={"discord": object()}, extra_prompt="event=meeting.ended"
+    ) is True
 
-    launch.assert_called_once_with(job)
+    launch.assert_called_once_with(job, extra_prompt="event=meeting.ended")
     run.assert_not_called()
 
 
@@ -698,7 +705,7 @@ def test_gateway_tool_run_without_adapter_objects_hands_off(monkeypatch):
 
     created.assert_called_once_with("tool-job", source="direct", scheduled_instant=None)
     assert job["execution_id"] == "exec-tool"
-    launch.assert_called_once_with(job)
+    launch.assert_called_once_with(job, extra_prompt=None)
     run.assert_not_called()
 
 
@@ -715,7 +722,7 @@ def test_shared_run_path_creates_execution_before_managed_handoff(monkeypatch):
 
     created.assert_called_once_with("manual-job", source="direct", scheduled_instant=None)
     assert job["execution_id"] == "exec-new"
-    launch.assert_called_once_with(job)
+    launch.assert_called_once_with(job, extra_prompt=None)
 
 
 def test_lost_execution_start_cas_prevents_side_effects(monkeypatch):
