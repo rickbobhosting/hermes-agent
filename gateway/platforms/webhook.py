@@ -573,7 +573,18 @@ class WebhookAdapter(BasePlatformAdapter):
             return route_name, None, profile, _json_error("Unknown or unconfigured profile", 404)
         if not route_config:
             return route_name, None, profile, _json_error(f"Unknown route: {route_name}", 404)
-        if not self._route_allows_profile(route_config, profile):
+        # A standalone named-profile gateway resolves its own /p/<name>/ prefix
+        # to None because the launch home is already that profile. Keep an
+        # exactly named Project meeting route usable on that self prefix, while
+        # leaving bare/default and foreign-profile routes fail-closed.
+        self_prefix = (request.match_info.get("profile") or "").strip()
+        standalone_project_meeting = (
+            route_name == "meeting-lifecycle"
+            and profile is None
+            and self_prefix.startswith("project-")
+            and route_config.get("profile") == self_prefix
+        )
+        if not self._route_allows_profile(route_config, profile) and not standalone_project_meeting:
             logger.warning("[webhook] Route %s is not authorized for profile %r", route_name, profile or "default")
             # Same as unknown-route so profile mismatches can't enumerate route bindings.
             return route_name, None, profile, _json_error(f"Unknown route: {route_name}", 404)

@@ -58,6 +58,39 @@ async def _drain_background_tasks(adapter: WebhookAdapter) -> None:
 
 class TestCronJobTrigger:
     @pytest.mark.asyncio
+    async def test_standalone_project_meeting_route_accepts_only_its_self_prefix(self):
+        """A named standalone home treats /p/self/ as its exact Project route."""
+        adapter = _make_adapter({
+            "meeting-lifecycle": {
+                "profile": "project-fixture",
+                "secret": _INSECURE_NO_AUTH,
+                "cron_job": "project-meeting-lifecycle",
+                "prompt": "Process {meeting_id}",
+            }
+        })
+        app = _create_app(adapter)
+        app.router.add_post("/p/{profile}/webhooks/{route_name}", adapter._handle_webhook)
+        body = json.dumps({"event_type": "meeting.ended", "meeting_id": "one"}).encode()
+        with (
+            patch("hermes_cli.profiles.profile_matches_home", side_effect=lambda p: p == "project-fixture"),
+            patch("tools.cronjob_tools.execute_job_for_event", return_value={
+                "claimed": True, "success": True, "error": None
+            }),
+        ):
+            async with TestClient(TestServer(app)) as cli:
+                bare = await cli.post("/webhooks/meeting-lifecycle", data=body)
+                assert bare.status == 404
+                foreign = await cli.post(
+                    "/p/project-foreign/webhooks/meeting-lifecycle", data=body
+                )
+                assert foreign.status == 404
+                own = await cli.post(
+                    "/p/project-fixture/webhooks/meeting-lifecycle", data=body
+                )
+                assert own.status == 202
+                await _drain_background_tasks(adapter)
+
+    @pytest.mark.asyncio
     async def test_meeting_burst_retries_same_delivery_after_busy_run(self):
         """A second meeting event must remain retryable while the cron job runs."""
         adapter = _make_adapter({
