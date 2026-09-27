@@ -16,7 +16,8 @@ import json
 import os
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 from hermes_cli.auth_constants import (
@@ -36,6 +37,40 @@ _MISSING_ACCESS_TOKEN_MSG = (
 _MISSING_REFRESH_TOKEN_MSG = (
     "Codex auth is missing refresh_token. Run `hermes auth` to re-authenticate.")
 _NO_CREDENTIALS_MSG = "No Codex credentials stored. Run `hermes auth` to authenticate."
+
+
+@contextmanager
+def _shared_codex_auth_scope():
+    """Use one locked Codex OAuth store without changing the profile's other credentials.
+
+    A staged invocation may name the Orchestra home explicitly. Refresh tokens
+    must have one writer, so this redirects Codex reads and refreshes to that
+    store instead of copying its single-use grant into specialist auth.json.
+    """
+    source = os.environ.get("HERMES_CODEX_AUTH_HOME", "").strip()
+    if not source:
+        yield
+        return
+    home = Path(source)
+    auth_file = home / "auth.json"
+    if not home.is_absolute() or not auth_file.is_file() or auth_file.is_symlink():
+        raise AuthError("Shared Codex auth home is unavailable", provider="openai-codex")
+    if auth_file.stat().st_mode & 0o077:
+        raise AuthError("Shared Codex auth store permissions are unsafe", provider="openai-codex")
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _with_shared_codex_auth(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _shared_codex_auth_scope():
+            return function(*args, **kwargs)
+    return wrapped
 
 
 def _parse_retry_after_seconds(headers: Any) -> Optional[int]:
@@ -849,3 +884,11 @@ def _codex_device_code_login() -> Dict[str, Any]:
             "refresh_token": tokens.get("refresh_token", "")},
         "base_url": _codex_base_url(), "last_refresh": _utc_now_z(), "auth_mode": "chatgpt",
         "source": "device-code"}
+
+
+# The staged worker opts in per profile. Wrapping the public Codex entry points
+# keeps all existing auth transactions and cross-process locks on the single
+# source path while Anthropic and other profile credentials remain local.
+_read_codex_tokens = _with_shared_codex_auth(_read_codex_tokens)
+_save_codex_tokens = _with_shared_codex_auth(_save_codex_tokens)
+resolve_codex_runtime_credentials = _with_shared_codex_auth(resolve_codex_runtime_credentials)
