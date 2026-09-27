@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 import copy
 
 from hermes_constants import display_hermes_home
+from cron.project_delivery_policy import is_project_profile, project_delivery_error
 
 logger = logging.getLogger(__name__)
 
@@ -965,6 +966,24 @@ def cronjob(
     del a["task_id"]  # unused but kept for handler signature compatibility
     try:
         normalized = (action or "").strip().lower()
+        if is_project_profile() and normalized in {"create", "update", "run", "resume"}:
+            if normalized == "create" and not _normalize_deliver_param(a["deliver"]):
+                # An omitted target normally follows the originating chat, which
+                # could be a DM. Project jobs always use their own room.
+                a["deliver"] = "matrix"
+            if normalized == "update" and a["deliver"] is not None and not _normalize_deliver_param(a["deliver"]):
+                a["deliver"] = "matrix"
+            for field in ("deliver", "failure_deliver"):
+                value = a[field]
+                if value is not None and value != "":
+                    error = project_delivery_error(_normalize_deliver_param(value))
+                    if error:
+                        return tool_error(error, success=False)
+            if any(a[field] for field in ("script", "monitor_script", "monitor_url", "workdir", "enabled_toolsets")) or a["no_agent"]:
+                return tool_error(
+                    "Project cron jobs may run only agent prompts and skills in the profile workspace",
+                    success=False,
+                )
         handler = _JOBLESS_ACTIONS.get(normalized)
         if handler is not None:
             return handler(a)
@@ -975,6 +994,13 @@ def cronjob(
         job, error = _resolve_job_or_error(job_id)
         if error is not None:
             return error
+        if is_project_profile() and normalized in {"update", "run", "resume"}:
+            for field in ("deliver", "failure_deliver"):
+                stored = job.get(field)
+                if stored and (error := project_delivery_error(str(stored))):
+                    return tool_error(error, success=False)
+            if job.get("script") or job.get("monitor_script") or job.get("no_agent") or job.get("enabled_toolsets"):
+                return tool_error("Project cron scripts are disabled", success=False)
         handler = _JOB_ACTIONS.get(normalized)
         if handler is None:
             return tool_error(f"Unknown cron action '{action}'", success=False)

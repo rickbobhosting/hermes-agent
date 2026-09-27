@@ -957,6 +957,11 @@ def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> List[d
     alerts) resolves from ``failure_deliver`` INSTEAD when the job carries one —
     ``failure_deliver: local`` is the structural opt-out; absent, failures follow ``deliver``."""
     deliver = _normalize_deliver_value(_delivery_lane_value(job, for_failure=for_failure))
+    from cron.project_delivery_policy import project_delivery_error
+
+    if project_delivery_error(deliver):
+        logger.warning("Project cron delivery blocked by profile room policy (job=%s)", job.get("id", "?"))
+        return []
     if deliver == "local":
         return []
 
