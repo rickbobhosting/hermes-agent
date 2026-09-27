@@ -185,6 +185,11 @@ class WebhookAdapter(BasePlatformAdapter):
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
         self._rate_counts: Dict[str, Deque[float]] = {}  # per-route hit timestamps in a fixed window
+        # Meeting lifecycle events share one profile cron job. Admit only one
+        # in-flight trigger per route/job so a burst is retried by the Hub's
+        # durable delivery queue instead of being acknowledged then skipped by
+        # cron's at-most-once fire claim.
+        self._meeting_cron_inflight: set[tuple[str, str, str]] = set()
         self._rate_limit: int = int(extra.get("rate_limit", 30))  # per minute
         self._max_body_bytes: int = int(extra.get("max_body_bytes", 1_048_576))  # 1MB
         self._script_timeout_seconds: int = int(extra.get("script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_SECONDS))
@@ -508,6 +513,22 @@ class WebhookAdapter(BasePlatformAdapter):
         the job's own prompt, skills, model and delivery apply. Same auth/rate-limit/filter/script/idempotency
         pipeline as agent routes; 202 immediately, the run happens on a worker thread."""
         job_ref = str(route_config["cron_job"])
+        admission_key = (
+            (route_name, profile or "default", job_ref)
+            if route_name == "meeting-lifecycle" else None
+        )
+        if admission_key is not None:
+            if admission_key in self._meeting_cron_inflight:
+                # _handle_webhook recorded this ID just before dispatch.
+                # Releasing it is essential: a later retry carries the same
+                # X-Request-ID and must be allowed to enter after the run.
+                self._seen_deliveries.pop(delivery_id, None)
+                return web.json_response(
+                    {"status": "busy", "route": route_name},
+                    status=503,
+                    headers={"Retry-After": "30"},
+                )
+            self._meeting_cron_inflight.add(admission_key)
         event_context = (f"This run was triggered by webhook event '{event_type}' on route '{route_name}' "
                          f"(not the schedule).\n\n{prompt}")
         logger.info("[webhook] cron-trigger event=%s route=%s job=%s delivery=%s", event_type, route_name, job_ref,
@@ -526,8 +547,17 @@ class WebhookAdapter(BasePlatformAdapter):
                                    route_name, result.get("error"))
             except Exception:
                 logger.exception("[webhook] cron-trigger failed job=%s route=%s", job_ref, route_name)
+            finally:
+                if admission_key is not None:
+                    self._meeting_cron_inflight.discard(admission_key)
 
-        task = asyncio.create_task(_fire_cron_job())
+        try:
+            task = asyncio.create_task(_fire_cron_job())
+        except Exception:
+            if admission_key is not None:
+                self._meeting_cron_inflight.discard(admission_key)
+            self._seen_deliveries.pop(delivery_id, None)
+            raise
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return web.json_response({"status": "accepted", "route": route_name, "cron_job": job_ref, "event": event_type,

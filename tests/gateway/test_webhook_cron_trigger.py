@@ -18,6 +18,7 @@ Covers:
 
 import asyncio
 import json
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -56,6 +57,59 @@ async def _drain_background_tasks(adapter: WebhookAdapter) -> None:
 # ===================================================================
 
 class TestCronJobTrigger:
+    @pytest.mark.asyncio
+    async def test_meeting_burst_retries_same_delivery_after_busy_run(self):
+        """A second meeting event must remain retryable while the cron job runs."""
+        adapter = _make_adapter({
+            "meeting-lifecycle": {
+                "secret": _INSECURE_NO_AUTH,
+                "cron_job": "project-meeting-lifecycle",
+                "prompt": "Process {meeting_id}",
+            }
+        })
+        started = threading.Event()
+        release = threading.Event()
+        fired = []
+
+        def _fake_execute(job_ref, extra_prompt=None):
+            fired.append((job_ref, extra_prompt))
+            if len(fired) == 1:
+                started.set()
+                assert release.wait(5)
+            return {"claimed": True, "success": True, "error": None}
+
+        body_a = json.dumps({"event_type": "meeting.ended", "meeting_id": "a"}).encode()
+        body_b = json.dumps({"event_type": "meeting.ended", "meeting_id": "b"}).encode()
+        with patch("tools.cronjob_tools.execute_job_for_event", side_effect=_fake_execute):
+            async with TestClient(TestServer(_create_app(adapter))) as cli:
+                first = await cli.post(
+                    "/webhooks/meeting-lifecycle",
+                    data=body_a,
+                    headers={"X-Request-ID": "meeting-a"},
+                )
+                assert first.status == 202
+                assert await asyncio.to_thread(started.wait, 2)
+
+                busy = await cli.post(
+                    "/webhooks/meeting-lifecycle",
+                    data=body_b,
+                    headers={"X-Request-ID": "meeting-b"},
+                )
+                assert busy.status == 503
+                assert busy.headers["Retry-After"] == "30"
+                release.set()
+                await _drain_background_tasks(adapter)
+
+                retry = await cli.post(
+                    "/webhooks/meeting-lifecycle",
+                    data=body_b,
+                    headers={"X-Request-ID": "meeting-b"},
+                )
+                assert retry.status == 202
+                await _drain_background_tasks(adapter)
+        assert len(fired) == 2
+        assert "Process b" in fired[1][1]
+
     @pytest.mark.asyncio
     async def test_post_fires_job_with_event_context(self):
         routes = {
