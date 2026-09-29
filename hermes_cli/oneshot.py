@@ -601,6 +601,8 @@ def _run_agent(
             # commands via HERMES_YOLO_MODE=1, skill secret capture degrades gracefully.
             clarify_callback=_oneshot_clarify_callback,
         )
+        # This process hard-exits after one turn. A queued daemon review would be lost.
+        agent._background_review_no_defer = True
         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
         agent.suppress_status_output = True
         agent.stream_delta_callback = None
@@ -640,6 +642,9 @@ def _close_agent(agent, session_db) -> None:
     """Teardown mirroring gateway/run.py:_cleanup_agent_resources (NOT cli.py:_run_cleanup):
     oneshot has no _active_agent_ref and the hard-exit path skips finalizers."""
     if agent is not None:
+        from agent.background_review import wait_for_background_review
+
+        _quietly("background review wait", lambda: wait_for_background_review(agent))
         # Linger (bounded) for notify_on_complete background processes BEFORE agent.close():
         # close() kill_all()s the task and the dying parent owns the children's stdout pipes, so
         # exiting now destroys in-flight deliveries (e.g. Bot Mode handoff replies).

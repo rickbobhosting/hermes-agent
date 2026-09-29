@@ -14,6 +14,7 @@ wrapper in run_agent.AIAgent._spawn_background_review:
 import threading
 import time
 import types
+from contextvars import ContextVar
 
 import pytest
 
@@ -34,6 +35,7 @@ def test_defer_mode_values():
     assert defer_mode({"defer": "auto"}) == "auto"
     assert defer_mode({"defer": "never"}) == "never"
     assert defer_mode({"defer": "NEVER"}) == "never"
+    assert defer_mode({"defer": "always"}) == "always"
     # Unknown values fall back to auto (the safe, documented default).
     assert defer_mode({"defer": "sometimes"}) == "auto"
     assert defer_mode({"defer": 3}) == "auto"
@@ -126,6 +128,35 @@ def test_dispatch_blocked_by_busy_server():
     assert q.pending_count() == 1
 
 
+def test_always_deferral_waits_for_chat_quiet_but_ignores_local_server():
+    q, clock = _make_queue(server_idle=False)
+    q.enqueue(_FakeAgent(), "s1", {"task_cfg": {"defer": "always"}})
+    q.note_turn_started()
+    q.note_turn_finished()
+    assert q._pop_dispatchable() is None
+    clock["t"] += _IDLE_SETTLE_S + 1
+    assert q._pop_dispatchable().session_key == "s1"
+
+
+def test_deferred_review_preserves_enqueuing_profile_context():
+    profile = ContextVar("test_review_profile", default="wrong-default")
+    q, clock = _make_queue(server_idle=False)
+    observed = []
+    agent = _FakeAgent()
+    agent._spawn_background_review_now = lambda **kw: observed.append(profile.get())
+    token = profile.set("project-fwmb")
+    try:
+        q.enqueue(agent, "fwmb-session", {"task_cfg": {"defer": "always"}})
+    finally:
+        profile.reset(token)
+    q._still_enabled = lambda item: True
+    q.note_turn_started()
+    q.note_turn_finished()
+    clock["t"] += _IDLE_SETTLE_S + 1
+    q._dispatch_item(q._pop_dispatchable())
+    assert observed == ["project-fwmb"]
+
+
 def test_aged_out_item_dispatches_despite_busy_server():
     q, clock = _make_queue(server_idle=False)
     agent = _FakeAgent()
@@ -213,6 +244,13 @@ def test_wrapper_spawns_immediately_for_non_managed(monkeypatch):
     spawn([{"role": "user", "content": "hi"}], review_skills=True)
     assert calls["enqueued"] == []
     assert len(calls["spawned"]) == 1
+
+
+def test_wrapper_defers_cloud_when_always_and_oneshot_bypasses(monkeypatch):
+    spawn, calls = _wrapper_agent(monkeypatch, defer="always", managed=False)
+    spawn([{"role": "user", "content": "hi"}], review_memory=True)
+    assert len(calls["enqueued"]) == 1
+    assert calls["spawned"] == []
 
 
 def test_wrapper_defer_never_is_old_behavior(monkeypatch):

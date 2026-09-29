@@ -3,11 +3,13 @@
 On the managed llama-server the post-turn review fork monopolizes the GPU the next prompt
 needs and the next live turn cancels it (decode cost paid, learning lost). Reviews bound for
 the managed endpoint are therefore queued and dispatched when the machine is quiet
-(``auxiliary.background_review.defer``: ``auto`` = exactly that case, ``never`` = old behavior;
+(``auxiliary.background_review.defer``: ``auto`` = managed local only, ``always`` = all runtimes,
+``never`` = immediate;
 explicit /refine never defers). One slot per session, newest snapshot wins (a review replays
 the whole conversation, so coalescing is dedup, not loss); aged-out items (defer_max_age_s,
 default 30 min) dispatch regardless of idleness; in-memory best-effort like the immediate
-fork. Idle truth is the supervisor's /slots held for a settle window.
+fork. Managed local reviews also require the supervisor's /slots to be idle; cloud reviews
+need only the process-quiet settle window. Dispatch restores the enqueuing profile context.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import logging
 import threading
 import time
 import urllib.request
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -28,9 +31,9 @@ _MAX_AGE_DEFAULT_S = 30.0 * 60.0  # dispatch regardless of idleness past this ag
 
 
 def defer_mode(task_cfg: Optional[Dict[str, Any]]) -> str:
-    """'auto' (default) or 'never' from auxiliary.background_review.defer."""
+    """'auto' (default), 'always', or 'never' from auxiliary.background_review.defer."""
     raw = str((task_cfg or {}).get("defer", "auto")).strip().lower()
-    return raw if raw in ("auto", "never") else "auto"
+    return raw if raw in ("auto", "always", "never") else "auto"
 
 
 def defer_max_age_s(task_cfg: Optional[Dict[str, Any]]) -> float:
@@ -64,6 +67,7 @@ class _PendingReview:
     session_key: str
     kwargs: Dict[str, Any]
     enqueued_at: float
+    context: Context
 
 
 class ReviewIdleQueue:
@@ -98,7 +102,9 @@ class ReviewIdleQueue:
         with self._lock:
             existing = self._pending.get(session_key)
             enqueued_at = existing.enqueued_at if existing is not None else self._now()
-            self._pending[session_key] = _PendingReview(agent, session_key, kwargs, enqueued_at)
+            self._pending[session_key] = _PendingReview(
+                agent, session_key, kwargs, enqueued_at, copy_context(),
+            )
         self._ensure_thread()
         self._wake.set()
         logger.info("Background review deferred (session=%s, queued=%d)", session_key[-12:], len(self._pending))
@@ -129,13 +135,16 @@ class ReviewIdleQueue:
             aged = [p for p in self._pending.values()
                     if now - p.enqueued_at >= defer_max_age_s(p.kwargs.get("task_cfg"))]
             candidate = min(aged, key=lambda p: p.enqueued_at) if aged else None
-        if candidate is None and (self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle()):
-            return None
-        with self._lock:
-            if candidate is None:
+        aged_out = candidate is not None
+        if candidate is None:
+            with self._lock:
                 if not self._pending:
                     return None
                 candidate = min(self._pending.values(), key=lambda p: p.enqueued_at)
+        cloud_only = defer_mode(candidate.kwargs.get("task_cfg")) == "always"
+        if not aged_out and (self._quiet_for() < _IDLE_SETTLE_S or (not cloud_only and not self._server_idle())):
+            return None
+        with self._lock:
             return self._pending.pop(candidate.session_key, None)
 
     def _run(self) -> None:
@@ -149,19 +158,25 @@ class ReviewIdleQueue:
             try:
                 item = self._pop_dispatchable()
                 if item is not None:
-                    if not self._still_enabled(item):
-                        logger.info(
-                            "Deferred background review dropped: reviews were disabled while it was queued (session=%s)",
-                            item.session_key[-12:])
-                        continue
-                    logger.info(
-                        "Dispatching deferred background review (session=%s, waited=%.0fs, queued=%d)",
-                        item.session_key[-12:], self._now() - item.enqueued_at, self.pending_count())
-                    item.agent._spawn_background_review_now(**item.kwargs)
+                    self._dispatch_item(item)
             except Exception:  # noqa: BLE001 — dispatcher must survive anything
                 logger.warning("Deferred review dispatch failed", exc_info=True)
             if item is None:
                 time.sleep(_POLL_INTERVAL_S)
+
+    def _dispatch_item(self, item: _PendingReview) -> None:
+        """Run config and fork under the enqueuing profile's ContextVars."""
+        if not item.context.run(self._still_enabled, item):
+            logger.info(
+                "Deferred background review dropped: reviews were disabled while it was queued (session=%s)",
+                item.session_key[-12:],
+            )
+            return
+        logger.info(
+            "Dispatching deferred background review (session=%s, waited=%.0fs, queued=%d)",
+            item.session_key[-12:], self._now() - item.enqueued_at, self.pending_count(),
+        )
+        item.context.run(item.agent._spawn_background_review_now, **item.kwargs)
 
     @staticmethod
     def _still_enabled(item: _PendingReview) -> bool:

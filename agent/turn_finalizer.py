@@ -644,13 +644,15 @@ def finalize_turn(
     if (
         final_response
         and not interrupted
+        and not failed
         and not getattr(agent, "skip_background_review", False)
-        and (_should_review_memory or _should_review_skills)
+        and (_should_review_memory or _should_review_skills or getattr(agent, "_review_on_completed_turn", False))
     ):
         with suppress(Exception):
             agent._spawn_background_review(
-                messages_snapshot=list(messages), review_memory=_should_review_memory,
-                review_skills=_should_review_skills,
+                messages_snapshot=list(messages),
+                review_memory=_should_review_memory or getattr(agent, "_review_on_completed_turn", False),
+                review_skills=_should_review_skills or getattr(agent, "_review_on_completed_turn", False),
             )
 
     # Memory provider on_session_end()/shutdown_all() are NOT called here:

@@ -185,9 +185,12 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def _review_should_defer(agent: Any, task_cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when an automatic background review targets the managed local runtime under ``defer: auto``."""
+    """Defer cloud reviews too when configured, except on ephemeral agent processes."""
     from agent.review_idle_queue import defer_mode, review_targets_managed_local
-    return defer_mode(task_cfg) == "auto" and review_targets_managed_local(agent, task_cfg)
+    if getattr(agent, "_background_review_no_defer", False):
+        return False
+    mode = defer_mode(task_cfg)
+    return mode == "always" or (mode == "auto" and review_targets_managed_local(agent, task_cfg))
 
 
 def _review_queue_key(agent: Any) -> str:

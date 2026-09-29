@@ -2176,10 +2176,18 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     return setup
 
 
+def _project_closeout_review_job(job: dict) -> bool:
+    """Opt in only the two named closeouts inside a Project profile."""
+    return _get_hermes_home().name.startswith("project-") and str(job.get("name") or "") in {
+        "project-end-of-day", "project-friday-weekly",
+    }
+
+
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    project_review_job = _project_closeout_review_job(job)
+    agent = AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2206,11 +2214,17 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         skip_context_files=not bool(workdir),
         load_soul_identity=True,
         skip_memory=False,
-        skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
+        skip_background_review=not project_review_job,
         platform="cron",
         session_id=session_id,
         session_db=session_db,
     )
+    if project_review_job:
+        # A named Project closeout is a one-turn session. Review it even when
+        # nudge counters are zero, before the scheduler closes the profile scope.
+        agent._review_on_completed_turn = True
+        agent._background_review_no_defer = True
+    return agent
 
 
 class _FireAudit:
@@ -2299,6 +2313,10 @@ def run_job(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        if _project_closeout_review_job(job):
+            from agent.background_review import wait_for_background_review
+
+            wait_for_background_review(agent)
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"

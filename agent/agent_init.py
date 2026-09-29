@@ -1330,6 +1330,14 @@ def _apply_agent_section(agent, _agent_cfg):
     with suppress(Exception):
         agent._skill_nudge_interval = int(_agent_cfg.get("skills", {}).get("creation_nudge_interval", 10))
 
+    # A profile may request a review after every completed conversation turn. This is
+    # independent of the legacy nudge counters, which can be zero on short sessions.
+    _aux = _agent_cfg.get("auxiliary") or {}
+    _review = _aux.get("background_review") or {} if isinstance(_aux, dict) else {}
+    agent._review_on_completed_turn = bool(
+        _review.get("on_completed_turn", False) if isinstance(_review, dict) else False
+    )
+
     _agent_section = _cfg_dict(_agent_cfg, "agent")
     agent.budget_warning_ratio = normalize_budget_warning_ratio(
         _agent_section.get("budget_warning_ratio")

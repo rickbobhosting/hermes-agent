@@ -1,13 +1,13 @@
 """Tests for the skip_background_review constructor flag.
 
-Verifies that AIAgent can be instructed to skip the end-of-turn
-_spawn_background_review fork (~30K tokens / event), which is essential
-on cron sessions that have no human-in-the-loop value from skill/memory
-review forks.
+Verifies that AIAgent can skip the end-of-turn review, while named Project
+closeout cron sessions opt in to durable learning.
 """
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from pathlib import Path
+from threading import Event, Thread
 
 from run_agent import AIAgent
 from agent.turn_finalizer import finalize_turn
@@ -111,21 +111,99 @@ def test_finalize_turn_fires_review_when_flag_unset() -> None:
     agent._spawn_background_review.assert_called_once()
 
 
-def test_cron_construction_sets_skip_background_review() -> None:
-    """The cron scheduler MUST construct AIAgent with skip_background_review=True.
-
-    Verified via source-text inspection — the cron scheduler is heavy to
-    boot in tests, so we assert that the source declares the flag rather
-    than running the scheduler. This catches accidental removal.
-    """
-    import pathlib
-
-    scheduler_src = pathlib.Path(__file__).resolve().parents[2] / "cron" / "scheduler.py"
-    text = scheduler_src.read_text(encoding="utf-8")
-
-    assert "skip_background_review=True" in text, (
-        "cron/scheduler.py must construct AIAgent with skip_background_review=True."
+def test_project_short_chat_reviews_both_stores_without_nudges() -> None:
+    agent = _make_agent(skip_background_review=False)
+    _stub_agent_for_finalize(agent)
+    agent._review_on_completed_turn = True
+    agent._iters_since_skill = 0
+    finalize_turn(
+        agent,
+        final_response="ok",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[{"role": "assistant", "content": "ok"}],
+        conversation_history=[],
+        effective_task_id="test",
+        turn_id="short-chat",
+        user_message="correction",
+        original_user_message="correction",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(1)",
     )
+    agent._spawn_background_review.assert_called_once()
+    assert agent._spawn_background_review.call_args.kwargs["review_memory"] is True
+    assert agent._spawn_background_review.call_args.kwargs["review_skills"] is True
+
+
+def test_failed_short_chat_does_not_review() -> None:
+    agent = _make_agent(skip_background_review=False)
+    _stub_agent_for_finalize(agent)
+    agent._review_on_completed_turn = True
+    agent._iters_since_skill = 0
+    finalize_turn(
+        agent,
+        final_response="",
+        api_call_count=1,
+        interrupted=False,
+        failed=True,
+        messages=[{"role": "user", "content": "correction"}],
+        conversation_history=[],
+        effective_task_id="test",
+        turn_id="failed-chat",
+        user_message="correction",
+        original_user_message="correction",
+        _should_review_memory=False,
+        _turn_exit_reason="session_persistence_failed",
+    )
+    agent._spawn_background_review.assert_not_called()
+
+
+def test_cron_review_is_limited_to_project_closeout_jobs(monkeypatch) -> None:
+    """Only the two Project closeouts get a durable session review."""
+    from cron.scheduler import _CronAgentSetup, _construct_cron_agent
+
+    monkeypatch.setattr("cron.scheduler._get_hermes_home", lambda: Path("/tmp/project-fwmb"))
+
+    setup = _CronAgentSetup(model="test", runtime={"provider": "test"})
+    for name, expected in (
+        ("project-end-of-day", True),
+        ("project-friday-weekly", True),
+        ("project-morning-checkin", False),
+        ("other-friday-weekly", False),
+    ):
+        factory = MagicMock()
+        agent = factory.return_value
+        _construct_cron_agent(
+            factory, {"name": name}, {}, setup,
+            workdir=None, session_id="cron-test", session_db=None,
+        )
+        assert factory.call_args.kwargs["skip_background_review"] is not expected
+        if expected:
+            assert agent._review_on_completed_turn is True
+            assert agent._background_review_no_defer is True
+
+    monkeypatch.setattr("cron.scheduler._get_hermes_home", lambda: Path("/tmp/personal"))
+    factory = MagicMock()
+    _construct_cron_agent(
+        factory, {"name": "project-end-of-day"}, {}, setup,
+        workdir=None, session_id="cron-personal", session_db=None,
+    )
+    assert factory.call_args.kwargs["skip_background_review"] is True
+
+
+def test_ephemeral_teardown_waits_for_review_completion() -> None:
+    from agent.background_review import wait_for_background_review
+
+    finished = Event()
+    agent = MagicMock()
+    agent._background_review_run.request_done = finished
+    agent._background_review_lock = None
+    agent.session_id = "project-fwmb-closeout"
+    worker = Thread(target=lambda: finished.set())
+    worker.start()
+    assert wait_for_background_review(agent, timeout_seconds=1) is True
+    worker.join()
 
 
 def test_persistence_failure_error_fallback_is_pinned_and_leaves_final_response_empty(monkeypatch, tmp_path) -> None:

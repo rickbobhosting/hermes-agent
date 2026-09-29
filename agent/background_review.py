@@ -98,6 +98,21 @@ def finish_background_review_run(agent: Any, run: Optional[_BackgroundReviewRun]
     run.request_done.set()
 
 
+def wait_for_background_review(agent: Any, timeout_seconds: float = 180.0) -> bool:
+    """Keep an ephemeral session alive until its review finishes, within a hard bound."""
+    with _optional_lock(agent, "_background_review_lock"):
+        run = getattr(agent, "_background_review_run", None)
+    if run is None:
+        return True
+    finished = run.request_done.wait(timeout=timeout_seconds)
+    if not finished:
+        logger.warning(
+            "Background review did not finish before ephemeral session teardown "
+            "(session=%s, timeout=%.0fs)", getattr(agent, "session_id", ""), timeout_seconds,
+        )
+    return finished
+
+
 def _interrupt_background_review(review_agent: Any) -> None:
     """Request abort off-thread so a wedged abort hook cannot stall the live turn (the bounded
     ``request_done`` wait in the canceller relies on this returning fast)."""
